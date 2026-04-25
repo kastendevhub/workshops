@@ -8,12 +8,12 @@
 
 By the end of this workshop you will be able to:
 
-- Deploy an **NFS server** and mount an NFS share on a Kubernetes node
+- Deploy a **standalone MinIO container** outside the cluster as an air-gapped object store
 - Deploy a **private Docker Registry** with HTTP basic authentication
-- Mirror Kasten container images into the private registry
+- Mirror Kasten container images into the private registry using `k10tools`
 - Install Kasten from the private registry (no Internet access required)
-- Create an **NFS Location Profile** in Kasten
-- Backup a MongoDB workload using the NFS-backed profile
+- Create an **S3-compatible Location Profile** in Kasten pointing to the external MinIO
+- Backup a MongoDB workload using the external MinIO profile
 
 ---
 
@@ -25,19 +25,21 @@ In secure or regulated environments, Kubernetes clusters may have **no outbound 
 2. **Object storage for backups** — public cloud is inaccessible
 
 This workshop addresses both:
-- A **private registry** on a separate host serves all container images
-- An **NFS server** acts as the backup location profile target
+- A **private registry** running as a Docker container on the host serves all container images
+- A **standalone MinIO** running as a Docker container on the host acts as an on-prem S3-compatible object store for backups
 
 ```
 Internet-isolated cluster:
-  ┌────────────────────────────────────┐
-  │  Kubernetes (kind-kasten-training) │
-  │  pulls images from ─────────────────────────▶ Private Registry (:5000)
-  │  backs up to ───────────────────────────────▶ NFS Server (/nfs)
-  └────────────────────────────────────┘
+  ┌────────────────────────────────────────┐
+  │  Kubernetes (kind-kasten-training)     │
+  │  pulls images from ───────────────────────────▶ Private Registry (host:5000)
+  │  backs up to ─────────────────────────────────▶ External MinIO (host:9100)
+  └────────────────────────────────────────┘
+                   │ Docker bridge (172.18.0.1)
+             Docker Desktop host
 ```
 
-In this workshop we simulate the "infra" host with Docker containers and local mounts.
+Both services run as Docker containers on your laptop, reachable from kind nodes via the Docker bridge gateway IP (`172.18.0.1`).
 
 ---
 
@@ -45,319 +47,347 @@ In this workshop we simulate the "infra" host with Docker containers and local m
 
 - Workshop 0 completed (kind cluster with CSI + VolumeSnapshot)
 - Workshop 1 completed (MongoDB running in `mongodb` namespace with sample data)
-- `docker` installed on your laptop
-- `nfs-kernel-server` (Linux) or NFS server emulation available
-  - On macOS, use Docker to run an NFS server container (instructions below)
+- `docker` and `mc` (MinIO client) installed on your laptop
 - `helm`, `kubectl`, `jq` installed
 
 ---
 
-## Part 1 — Deploy an NFS Server
+## Step 1 — Identify the Host IP Reachable from Kind Nodes
 
-### On Linux (native NFS server)
+Kind nodes communicate with Docker containers on the host via the Docker bridge gateway:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y nfs-kernel-server
-
-sudo mkdir -p /nfs
-sudo chown nobody:nogroup /nfs
-
-# Export to the docker bridge network (kind uses 172.18.0.0/16 by default)
-echo "/nfs 172.18.0.0/16(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
-
-sudo exportfs -a
-sudo systemctl restart nfs-kernel-server
+# Get the gateway IP of the kind Docker network
+GATEWAY_IP=$(docker inspect kasten-training-control-plane \
+  --format '{{ (index .NetworkSettings.Networks "kind").Gateway }}')
+echo "Host gateway IP (reachable from kind): $GATEWAY_IP"
+# Typically: 172.18.0.1
 ```
 
-### On macOS (NFS server via Docker)
+All Docker containers you start on the host with `-p <port>:<port>` are reachable from kind nodes at `${GATEWAY_IP}:<port>`.
+
+---
+
+## Step 2 — Deploy an External MinIO as Object Store
+
+Run a standalone MinIO container on your laptop, bound to all interfaces:
 
 ```bash
-# Use a containerized NFS server
+docker rm -f airgapped-minio 2>/dev/null || true
+
 docker run -d \
-  --name nfs-server \
-  --privileged \
-  -e NFS_EXPORT_0='/nfs *(rw,sync,no_subtree_check,no_root_squash)' \
-  -v /tmp/nfs-data:/nfs \
-  -p 2049:2049 \
-  erichough/nfs-server
-
-# Get the NFS server IP
-NFS_SERVER_IP=$(docker inspect nfs-server --format '{{ .NetworkSettings.IPAddress }}')
-echo "NFS server IP: $NFS_SERVER_IP"
+  --name airgapped-minio \
+  -p 9100:9000 \
+  -p 9101:9001 \
+  -e MINIO_ROOT_USER=airgapadmin \
+  -e MINIO_ROOT_PASSWORD=airgapadmin \
+  -v /tmp/airgapped-minio-data:/data \
+  quay.io/minio/minio server /data --console-address ":9001"
 ```
 
-### Test NFS from the kind node
+Create the backup bucket:
 
 ```bash
-# Exec into the kind control-plane container
-docker exec -it kasten-training-control-plane bash
+# Port-forward to localhost for mc configuration
+mc alias set airgapped http://localhost:9100 airgapadmin airgapadmin
+mc mb airgapped/airgapped-bucket
+mc ls airgapped/
+```
 
-# Install NFS client
-apt-get update && apt-get install -y nfs-common
+Verify reachability from inside the kind cluster:
 
-# Mount the NFS share (replace NFS_SERVER_IP)
-mkdir -p /mnt/nfs
-mount <NFS_SERVER_IP>:/nfs /mnt/nfs
-
-# Write a test file
-echo "NFS works!" > /mnt/nfs/test
-cat /mnt/nfs/test
-
-# Unmount (we'll use a PV for Kasten)
-umount /mnt/nfs
-exit
+```bash
+kubectl run test-minio --rm -i --restart=Never --image=curlimages/curl -- \
+  curl -s -o /dev/null -w "%{http_code}" \
+  "http://${GATEWAY_IP}:9100/minio/health/live"
+# Expected: 200
 ```
 
 ---
 
-## Part 2 — Create an NFS PersistentVolume for the NFS Profile
-
-Kasten's NFS Location Profile uses a PVC. Create a PV backed by the NFS export:
+## Step 3 — Deploy a Private Docker Registry
 
 ```bash
-NFS_SERVER_IP=<your-nfs-server-ip>
-
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: nfs-pv
-spec:
-  capacity:
-    storage: 20Gi
-  accessModes: [ReadWriteMany]
-  persistentVolumeReclaimPolicy: Retain
-  nfs:
-    path: /nfs
-    server: ${NFS_SERVER_IP}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nfs-pvc
-  namespace: kasten-io
-spec:
-  accessModes: [ReadWriteMany]
-  resources:
-    requests:
-      storage: 20Gi
-  volumeName: nfs-pv
-EOF
-```
-
-Verify the PVC is bound:
-```bash
-kubectl get pvc nfs-pvc -n kasten-io
-```
-
----
-
-## Part 3 — Deploy a Private Docker Registry
-
-```bash
-# Create an auth file with bcrypt-hashed credentials
+# Create auth directory with bcrypt-hashed credentials
 mkdir -p /tmp/registry-auth
 docker run --entrypoint htpasswd httpd:2 \
   -Bbn testuser testpassword > /tmp/registry-auth/htpasswd
 
-# Start the registry
+# Start the registry (port 5000 on all interfaces)
+docker rm -f private-registry 2>/dev/null || true
 docker run -d \
   --name private-registry \
   -p 5000:5000 \
   --restart always \
   -v /tmp/registry-auth:/auth \
   -e REGISTRY_AUTH=htpasswd \
-  -e REGISTRY_AUTH_HTPASSWD_REALM="Registry Realm" \
+  -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" \
   -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
   registry:2
-
-# Verify it's running
-docker ps --filter name=private-registry
 ```
 
-Get the registry IP:
+Test the registry:
+
 ```bash
-REGISTRY_IP=$(docker inspect private-registry --format '{{ .NetworkSettings.IPAddress }}')
-echo "Registry IP: $REGISTRY_IP"
-REGISTRY="${REGISTRY_IP}:5000"
+# From the Docker Desktop host, use localhost:5000
+# (Docker Desktop treats localhost as an insecure registry; 172.18.0.1 requires daemon config)
+docker login localhost:5000 -u testuser -p testpassword
+
+docker pull alpine
+docker tag alpine localhost:5000/alpine
+docker push localhost:5000/alpine
 ```
 
-Login to the registry:
-```bash
-docker login ${REGISTRY} -u testuser -p testpassword
-```
+> **Note:** `localhost:5000` and `${GATEWAY_IP}:5000` refer to the **same registry**. Docker Desktop on the host uses `localhost:5000` (always allowed as insecure). Kind nodes use `${GATEWAY_IP}:5000` (the Docker bridge gateway IP). The `hosts.toml` + `imagePullSecret` in the kind containerd config enables pulling from the `${GATEWAY_IP}:5000` address.
 
 ---
 
-## Part 4 — Configure the Kind Cluster to Use the Private Registry
+## Step 4 — Configure Kind to Trust the Private Registry
 
-Kind nodes need to know about the insecure private registry:
+Containerd in the kind node needs two changes: (1) the `config_path` option must point to `certs.d`, and (2) a `hosts.toml` must declare the registry as HTTP-capable.
 
 ```bash
-# Create a containerd registry config in the kind node
+# Enable certs.d in the kind node's containerd config
 docker exec kasten-training-control-plane bash -c "
-mkdir -p /etc/containerd/certs.d/${REGISTRY}
-cat > /etc/containerd/certs.d/${REGISTRY}/hosts.toml << EOF
-[host.\"http://${REGISTRY}\"]
-  capabilities = [\"pull\", \"resolve\"]
-  skip_verify = true
+cat >> /etc/containerd/config.toml << 'EOF'
+
+[plugins.\"io.containerd.grpc.v1.cri\".registry]
+  config_path = \"/etc/containerd/certs.d\"
 EOF
 "
 
-# Restart containerd in the kind node
+# Write the per-registry hosts.toml
+docker exec kasten-training-control-plane bash -c "
+mkdir -p /etc/containerd/certs.d/${GATEWAY_IP}:5000
+cat > /etc/containerd/certs.d/${GATEWAY_IP}:5000/hosts.toml << 'TOML'
+[host.\"http://${GATEWAY_IP}:5000\"]
+  capabilities = [\"pull\", \"resolve\"]
+  skip_verify = true
+TOML
+"
+
+# Restart containerd
 docker exec kasten-training-control-plane systemctl restart containerd
+sleep 5
 ```
 
-Test with a sample image:
-```bash
-# Pull alpine on the host and push to private registry
-docker pull alpine
-docker tag alpine ${REGISTRY}/alpine
-docker push ${REGISTRY}/alpine
+Create an image pull secret (containerd still needs Kubernetes-level credentials for authenticated registries):
 
-# Create a pod using the private registry image
+```bash
+kubectl create secret docker-registry registry-secret \
+  --namespace default \
+  --docker-server=${GATEWAY_IP}:5000 \
+  --docker-username=testuser \
+  --docker-password=testpassword
+```
+
+Test that the kind node can pull from the private registry:
+
+```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
 metadata:
   name: airgapped-test
 spec:
+  imagePullSecrets:
+  - name: registry-secret
   containers:
   - name: alpine
-    image: ${REGISTRY}/alpine
+    image: ${GATEWAY_IP}:5000/alpine
     command: ["tail", "-f", "/dev/null"]
 EOF
 
 kubectl wait pod/airgapped-test --for=condition=Ready --timeout=60s
 kubectl delete pod airgapped-test
+kubectl delete secret registry-secret -n default
 ```
 
 ---
 
-## Part 5 — Mirror Kasten Images to the Private Registry
+## Step 5 — Mirror Kasten Images to the Private Registry
 
-> **Note:** The `k10offline` tool was deprecated in Kasten 7.5.0 and replaced by `k10tools image`. The new tool ships as a container image — no binary download needed.
+`k10tools image copy` handles image discovery, pulling, retagging, and pushing:
 
 ```bash
-# Determine the Kasten version (same version used for the Helm install)
 K10_VERSION=$(helm search repo kasten/k10 --output json | jq -r '.[0].app_version')
 echo "Kasten version: $K10_VERSION"
 
-# Use k10tools to copy all Kasten images to the private registry
-# k10tools handles image discovery, pulling, retagging and pushing automatically
+# Copy all Kasten images to the private registry
+# This may take 10-20 minutes depending on your connection
 docker run --rm \
   gcr.io/kasten-images/k10tools:${K10_VERSION} \
   image copy \
-  --registry ${REGISTRY} \
+  --registry ${GATEWAY_IP}:5000 \
   --username testuser \
   --password testpassword \
   --insecure-registry
 ```
 
-> **Alternative manual approach** — if you need to mirror images without running a container (fully air-gapped host):
-> ```bash
-> # List all images required by the current Kasten version
-> docker run --rm gcr.io/kasten-images/k10tools:${K10_VERSION} image list
->
-> # For each image in the list, pull, retag and push:
-> docker pull gcr.io/kasten-images/executor:${K10_VERSION}
-> docker tag gcr.io/kasten-images/executor:${K10_VERSION} ${REGISTRY}/executor:${K10_VERSION}
-> docker push ${REGISTRY}/executor:${K10_VERSION}
-> # ... (repeat for all images — the list changes with each release, so always use `image list`)
-> ```
+> **Note:** This pulls all Kasten images from `gcr.io/kasten-images` and pushes them to your private registry. The list of images changes with each release — always use `k10tools image copy` rather than maintaining a manual image list.
+
+Verify that images were pushed:
+
+```bash
+curl -sk -u testuser:testpassword \
+  "http://${GATEWAY_IP}:5000/v2/_catalog" | jq '.repositories | length'
+# Expected: several dozen images
+```
 
 ---
 
-## Part 6 — Install Kasten from the Private Registry
+## Step 6 — Install Kasten from the Private Registry
+
+If Kasten is already installed, uninstall it first:
 
 ```bash
-helm repo add kasten https://charts.kasten.io/
-helm repo update
-
+helm uninstall k10 -n kasten-io 2>/dev/null || true
+# Wait for namespace to terminate
+kubectl wait namespace/kasten-io --for=delete --timeout=180s 2>/dev/null || true
 kubectl create namespace kasten-io
-
-helm install k10 kasten/k10 \
-  --namespace kasten-io \
-  --set global.airgapped.repository=${REGISTRY} \
-  --set global.airgapped.image.pullSecret="" \
-  --version ${K10_VERSION} \
-  --wait
 ```
 
-If the registry requires authentication, create an image pull secret first:
+Create the image pull secret for the private registry:
 
 ```bash
 kubectl create secret docker-registry registry-secret \
   --namespace kasten-io \
-  --docker-server=${REGISTRY} \
+  --docker-server=${GATEWAY_IP}:5000 \
   --docker-username=testuser \
   --docker-password=testpassword
+```
 
-# Reference it in the helm install
+Install Kasten from the private registry:
+
+```bash
 helm install k10 kasten/k10 \
   --namespace kasten-io \
-  --set global.airgapped.repository=${REGISTRY} \
+  --set global.airgapped.repository=${GATEWAY_IP}:5000 \
   --set global.pullSecrets[0]=registry-secret \
   --version ${K10_VERSION} \
-  --wait
+  --wait --timeout=600s
 ```
 
-Verify all Kasten pods start from the private registry:
+Verify all pods pull from the private registry:
+
 ```bash
-kubectl get pods -n kasten-io -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{end}' | sort -u
+kubectl get pods -n kasten-io -o jsonpath='{range .items[*]}{.spec.containers[*].image}{"\n"}{end}' | sort -u | head -5
+# All images should reference ${GATEWAY_IP}:5000
 ```
-
-All image references should point to your `${REGISTRY}` address.
 
 ---
 
-## Part 7 — Create an NFS Location Profile
+## Step 7 — Create a Location Profile for External MinIO
 
 ```bash
+kubectl create secret generic k10secret-airgapped -n kasten-io \
+  --from-literal=aws_access_key_id=airgapadmin \
+  --from-literal=aws_secret_access_key=airgapadmin
+
 cat <<EOF | kubectl apply -f -
 kind: Profile
 apiVersion: config.kio.kasten.io/v1alpha1
 metadata:
-  name: nfs-profile
+  name: airgapped-s3
   namespace: kasten-io
 spec:
   locationSpec:
-    fileStore:
-      claimName: nfs-pvc
-      subPath: kasten-backups
-    type: FileStore
+    credential:
+      secret:
+        apiVersion: v1
+        kind: Secret
+        name: k10secret-airgapped
+        namespace: kasten-io
+      secretType: AwsAccessKey
+    objectStore:
+      endpoint: http://${GATEWAY_IP}:9100
+      name: airgapped-bucket
+      objectStoreType: S3
+      pathType: Directory
+      region: us-east-1
+    type: ObjectStore
   type: Location
 EOF
 ```
 
-Validate the profile in the Kasten dashboard under **Settings → Location** — it should show a green checkmark.
+Verify the profile status:
+
+```bash
+kubectl get profile airgapped-s3 -n kasten-io -o jsonpath='{.status.validation}'
+# Expected: Success
+```
 
 ---
 
-## Part 8 — Backup MongoDB to NFS
+## Step 8 — Backup MongoDB to External MinIO
 
 In the Kasten dashboard:
 
 1. **Policies → + Create New Policy**
 2. Configure:
-   - Name: `mongodb-nfs-backup`
+   - Name: `mongodb-airgapped-backup`
    - Application: `mongodb` namespace
    - Backup Frequency: Hourly
    - Enable exports: ✓
-   - Export Location Profile: `nfs-profile`
+   - Export Location Profile: `airgapped-s3`
 3. **Create → Run Once → Yes, Continue**
 
-Monitor the policy run. After completion, verify backup files on the NFS server:
+Via `kubectl`:
 
 ```bash
-# Check NFS export directory
-ls /tmp/nfs-data/kasten-backups/   # on macOS with docker NFS
-# or
-ls /nfs/kasten-backups/             # on Linux
+cat <<EOF | kubectl apply -f -
+kind: Policy
+apiVersion: config.kio.kasten.io/v1alpha1
+metadata:
+  name: mongodb-airgapped-backup
+  namespace: kasten-io
+spec:
+  frequency: "@hourly"
+  retention:
+    hourly: 24
+  selector:
+    matchExpressions:
+    - key: k10.kasten.io/appNamespace
+      operator: In
+      values: [mongodb]
+  actions:
+  - action: backup
+  - action: export
+    exportParameters:
+      frequency: "@hourly"
+      profile:
+        name: airgapped-s3
+        namespace: kasten-io
+      exportData:
+        enabled: true
+    retention: {}
+EOF
+
+cat <<EOF | kubectl apply -f -
+kind: RunAction
+apiVersion: actions.kio.kasten.io/v1alpha1
+metadata:
+  name: airgapped-backup-run-1
+  namespace: kasten-io
+  labels:
+    k10.kasten.io/policyName: mongodb-airgapped-backup
+    k10.kasten.io/policyNamespace: kasten-io
+spec:
+  subject:
+    apiVersion: config.kio.kasten.io/v1alpha1
+    kind: Policy
+    name: mongodb-airgapped-backup
+    namespace: kasten-io
+EOF
+
+kubectl get runaction airgapped-backup-run-1 -n kasten-io
 ```
 
-You should see Kasten's encrypted backup artifacts.
+After completion, verify backup artifacts in MinIO:
+
+```bash
+mc ls airgapped/airgapped-bucket/ --recursive | head -10
+```
 
 ---
 
@@ -365,34 +395,34 @@ You should see Kasten's encrypted backup artifacts.
 
 | # | Check | Expected Result |
 |---|-------|-----------------|
-| 1 | NFS test file: `cat /tmp/nfs-data/test` | `"NFS works!"` |
-| 2 | Private registry: `docker ps --filter name=private-registry` | Container running |
-| 3 | Registry push test: `docker push ${REGISTRY}/alpine` | Push successful |
+| 1 | External MinIO reachable from kind | `curl` returns 200 from `http://${GATEWAY_IP}:9100/minio/health/live` |
+| 2 | Private registry running | `docker ps --filter name=private-registry` shows running |
+| 3 | Registry push test | `docker push localhost:5000/alpine` succeeds (use `localhost:5000` from host; kind sees it as `${GATEWAY_IP}:5000`) |
 | 4 | Kind node pulls from private registry | Pod `airgapped-test` reaches Ready state |
-| 5 | `kubectl get pods -n kasten-io` | All Kasten pods Running/Completed |
-| 6 | Kasten pod images: `kubectl get pods -n kasten-io -o jsonpath=...` | All images from private registry |
-| 7 | `kubectl get profile nfs-profile -n kasten-io` | Profile exists |
-| 8 | NFS backup: check `/nfs/kasten-backups/` | Backup artifacts present |
+| 5 | `kubectl get pods -n kasten-io` | All Kasten pods Running/Completed, images from private registry |
+| 6 | `kubectl get profile airgapped-s3 -n kasten-io` | Profile validation: Success |
+| 7 | After backup: `mc ls airgapped/airgapped-bucket/` | Backup artifacts present |
 
 ---
 
 ## This workshop has challenges
 
-- **`k10offline` is deprecated (since Kasten 7.5.0).** Use `k10tools image copy` (a container image) instead, as shown in Part 5. If you find older instructions or scripts referencing `k10offline pull`, they will fail on Kasten 7.5.0+.
-- **NFS on macOS via Docker has complex networking.** The `erichough/nfs-server` container runs in the Docker bridge network. The kind node containers run in the same bridge network and can reach NFS at the container's Docker IP — but only if the NFS server container started correctly with `--privileged`. Confirm with `docker logs nfs-server` and test the mount from inside the kind node as described in Part 1.
-- **Configuring containerd in the kind node** requires exec-ing into the node container and writing a `hosts.toml` file manually. The exact path changed between kind/containerd versions. If the pod still fails to pull from your registry after `systemctl restart containerd`, verify the path with `ls /etc/containerd/certs.d/` inside the node container.
-- **Image mirroring is slow on a laptop network.** Kasten has dozens of container images. `k10tools image copy` may take 10–20 minutes depending on your download speed. Plan for this before the session.
-- **`k10tools image copy --insecure-registry`** is needed when the private registry uses HTTP (no TLS), which is the case in this workshop. In production, use a registry with a valid TLS certificate.
+- **The private registry must be reachable from both the host and kind nodes.** Bind the registry to `0.0.0.0:5000` (the default for `docker run -p 5000:5000`). From the host, access it at `localhost:5000`. From kind nodes, access it at `${GATEWAY_IP}:5000` (Docker bridge gateway). These are two different URLs for the same service.
+- **Containerd `certs.d` requires `config_path` to be set explicitly.** Writing a `hosts.toml` into `/etc/containerd/certs.d/<registry>/hosts.toml` is not enough on its own — containerd only reads it if `config_path = "/etc/containerd/certs.d"` is also set under `[plugins."io.containerd.grpc.v1.cri".registry]` in `config.toml`. Without this, containerd ignores the `hosts.toml` and tries HTTPS, producing "http: server gave HTTP response to HTTPS client".
+- **Authentication for pulls requires an `imagePullSecret` even when `skip_verify = true`.** The `hosts.toml` controls TLS, not authentication. The private registry still requires valid credentials. Pass them via a `docker-registry` Kubernetes secret referenced in pod `imagePullSecrets` (or in the Kasten Helm chart via `global.pullSecrets[0]`).
+- **`k10tools image copy` takes 10–20 minutes** due to the number of Kasten component images. Plan for this before the session. Re-runs are fast because Docker caches pulled layers.
+- **`k10tools image copy --insecure-registry`** is required when the private registry uses HTTP (no TLS). In production, use a registry with a valid TLS certificate.
+- **NFS on macOS Docker Desktop is not supported.** The Docker Desktop VM does not have the NFS kernel module, so `rpc.nfsd` containers (`erichough/nfs-server`, `itsthenetwork/nfs-server-alpine`) always fail with "does not support NFS export". This workshop uses MinIO instead of NFS for the backup location — MinIO is simpler, cross-platform, and equally representative of air-gapped S3 storage.
+- **Image mirroring is version-specific.** The image list in `k10tools image copy` changes with each Kasten release. Always use the same `${K10_VERSION}` for both `k10tools image copy` and `helm install --version`. Mismatched versions cause pods to fail with `ImagePullBackOff`.
 
 ---
 
 ## Tips & References
 
 - [Kasten air-gapped install documentation](https://docs.kasten.io/latest/install/advanced.html#airgapped-install)
-- [k10tools image documentation](https://docs.kasten.io/latest/install/offline.html) — `k10tools` replaced `k10offline` in Kasten 7.5.0
+- [k10tools image documentation](https://docs.kasten.io/latest/install/offline.html)
 - [Docker Registry deployment guide](https://docs.docker.com/registry/deploying/)
-- [Kasten NFS Location Profile](https://docs.kasten.io/latest/usage/configuration.html#nfs-file-store)
-- In production, the private registry would typically be secured with a valid TLS certificate (not `skip_verify`). Tools like JFrog Artifactory, Harbor, or AWS ECR are common enterprise choices.
-- NFS requires the NFS client (`nfs-common` on Ubuntu/Debian) installed on **every Kubernetes node** — in a kind cluster this means installing it in each kind node container.
-- The `k10offline` tool handles the entire image mirror process including all Kasten sub-components. Without it, you must manually identify and mirror every image referenced in the Kasten Helm chart, which changes with each release.
+- [MinIO Docker Quickstart](https://min.io/docs/minio/container/index.html)
+- In production, the private registry would be JFrog Artifactory, Harbor, AWS ECR, or Azure ACR — all work with `k10tools image copy` by specifying the appropriate `--registry` value.
 - Kasten's `global.airgapped.repository` Helm value prefixes **all** image references in the chart — you don't need to configure images individually.
+- The `global.pullSecrets` Helm value accepts a list of secret names; each must be a `docker-registry` type secret in the `kasten-io` namespace.
