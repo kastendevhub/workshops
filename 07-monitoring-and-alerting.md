@@ -30,13 +30,13 @@ Prometheus (embedded in kasten-io namespace)
      │
      ├──▶ Kasten Dashboard (built-in metric widgets)
      │
-     └──▶ Grafana (embedded in kasten-io namespace)
+     └──▶ External Grafana (monitoring namespace — must be installed separately)
                │
                ├──▶ Custom dashboards
                └──▶ Alerting (email, Slack, PagerDuty, ...)
 ```
 
-Both Prometheus and Grafana are deployed as part of the Kasten Helm chart and require no additional installation.
+Prometheus is embedded in the Kasten Helm chart. **Grafana was removed from the Kasten chart in Kasten 7.5.0** and must be installed separately. This workshop installs Grafana into the `monitoring` namespace.
 
 ---
 
@@ -46,6 +46,13 @@ Both Prometheus and Grafana are deployed as part of the Kasten Helm chart and re
 - Workshop 1 completed (Kasten + MinIO + MongoDB installed, `mongodb-backup` policy run at least once)
 - Access to an SMTP server for email alerts (Gmail, Mailhog, or similar)
 - `kubectl`, `curl`, `jq` installed
+- **OIDC must not be enabled** on Kasten for this workshop. Kasten's Prometheus endpoint returns HTTP 401 when OIDC authentication is active. If you completed Workshop 5, disable OIDC before continuing:
+  ```bash
+  helm upgrade k10 kasten/k10 --namespace kasten-io \
+    --reuse-values \
+    --set auth.oidcAuth.enabled=false \
+    --wait
+  ```
 
 ---
 
@@ -137,6 +144,7 @@ kind: RunAction
 apiVersion: actions.kio.kasten.io/v1alpha1
 metadata:
   name: mongodb-fail-test
+  namespace: kasten-io
   labels:
     k10.kasten.io/policyName: mongodb-backup
     k10.kasten.io/policyNamespace: kasten-io
@@ -200,6 +208,20 @@ kubectl get secret grafana -n monitoring \
 
 Open [http://localhost:3000](http://localhost:3000) and log in with username `admin` and the password above.
 
+> **Note:** If you want to configure SMTP at install time, use the `grafana\.ini` key (with backslash-escaped dot — this is Helm's syntax for a key that literally contains a dot):
+> ```bash
+> helm install grafana grafana/grafana \
+>   --namespace monitoring \
+>   --set persistence.enabled=false \
+>   --set service.type=NodePort \
+>   --set service.nodePort=32030 \
+>   --set 'grafana\.ini.smtp.enabled=true' \
+>   --set 'grafana\.ini.smtp.host=mailhog.kasten-io.svc.cluster.local:1025' \
+>   --set 'grafana\.ini.smtp.from_address=grafana@kasten.lab' \
+>   --set 'grafana\.ini.smtp.skip_verify=true' \
+>   --wait
+> ```
+
 ### Connect Grafana to Kasten Prometheus
 
 Kasten's embedded Prometheus is still accessible via the Kasten gateway service within the cluster:
@@ -213,10 +235,9 @@ Kasten's embedded Prometheus is still accessible via the Kasten gateway service 
 
 ### 3a. Configure SMTP for Email Alerts
 
-In production, use your SMTP server. For local testing, use **Mailhog**:
+In production, use your SMTP server. For local testing, deploy **Mailhog** as a mail catcher:
 
 ```bash
-# Deploy Mailhog as a local mail catcher
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -237,8 +258,8 @@ spec:
       - name: mailhog
         image: mailhog/mailhog
         ports:
-        - containerPort: 1025  # SMTP
-        - containerPort: 8025  # Web UI
+        - containerPort: 1025
+        - containerPort: 8025
 ---
 apiVersion: v1
 kind: Service
@@ -261,17 +282,62 @@ kubectl port-forward svc/mailhog -n kasten-io 8025:8025 &
 echo "Mailhog UI: http://localhost:8025"
 ```
 
-In Grafana:
-1. **Alerting → Contact Points → + New Contact Point**
-2. Name: `email-alerts`
-3. Type: **Email**
-4. Address: `test@example.com`
-5. Click **Test** to send a test email
-6. Check [http://localhost:8025](http://localhost:8025) for the received test email
-7. **Save Contact Point**
+Configure Grafana SMTP via Helm upgrade. **Important:** use `'grafana\.ini.smtp.*'` (with the backslash-escaped dot) — using `grafana.ini.*` without the backslash creates the wrong YAML key structure and the settings are silently ignored:
 
-Set as the default contact point:
-- **Alerting → Notification Policies → Edit** the default policy → set contact point to `email-alerts`
+```bash
+helm upgrade grafana grafana/grafana \
+  --namespace monitoring \
+  --reuse-values \
+  --set 'grafana\.ini.smtp.enabled=true' \
+  --set 'grafana\.ini.smtp.host=mailhog.kasten-io.svc.cluster.local:1025' \
+  --set 'grafana\.ini.smtp.from_address=grafana@kasten.lab' \
+  --set 'grafana\.ini.smtp.from_name=Grafana' \
+  --set 'grafana\.ini.smtp.skip_verify=true' \
+  --wait
+```
+
+Verify SMTP settings took effect:
+```bash
+GRAFANA_PASSWORD=$(kubectl get secret grafana -n monitoring \
+  -o jsonpath="{.data.admin-password}" | base64 --decode)
+curl -s -u "admin:${GRAFANA_PASSWORD}" \
+  http://localhost:3000/api/admin/settings | jq '.smtp.enabled'
+# Expected: "true"
+```
+
+Create an email contact point via the Grafana UI or API:
+
+```bash
+curl -s -X POST "http://localhost:3000/api/v1/provisioning/contact-points" \
+  -u "admin:${GRAFANA_PASSWORD}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "email-alerts",
+    "type": "email",
+    "settings": {"addresses": "kasten-admin@kasten.lab"}
+  }' | jq '{uid, name}'
+```
+
+Test the contact point sends to Mailhog:
+```bash
+curl -s -X POST \
+  "http://localhost:3000/api/alertmanager/grafana/config/api/v1/receivers/test" \
+  -u "admin:${GRAFANA_PASSWORD}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "receivers": [{
+      "name": "email-alerts",
+      "grafana_managed_receiver_configs": [{
+        "type": "email",
+        "settings": {"addresses": "kasten-admin@kasten.lab"}
+      }]
+    }]
+  }'
+
+# Check Mailhog for the test email
+curl -s http://localhost:8025/api/v2/messages | jq '.count'
+# Expected: 1
+```
 
 ---
 
@@ -299,30 +365,109 @@ Set as the default contact point:
 
 ## Part 5 — Create an Alert Rule for Failed Backups
 
+### 5a. Create via Grafana UI
+
 1. In Grafana: **Alerting → Alert Rules → + New Alert Rule**
 2. Configure:
 
 | Field | Value |
 |-------|-------|
-| Rule name | `Failed Backup Alert` |
-| Query | `increase(catalog_actions_count{status="failed",type="backup"}[5m])` |
-| Condition | IS ABOVE `0` |
-| Evaluation group | Create or select a group |
-| Pending period | `0s` (fire immediately) |
+| Rule name | `Kasten Backup Failure` |
+| Folder | Create a new folder `Kasten Alerts` |
+| Query (A) | `sum(catalog_actions_count{status="failed",type="backup"})` |
+| Reduce (B) | `Last` |
+| Threshold (C) | IS ABOVE `0` |
+| Evaluation interval | `1m` |
+| Pending period | `1m` |
 | Contact point | `email-alerts` |
-| Summary | `Kasten backup failure detected` |
-| Description | `Policy: {{ $labels.policy }}, Namespace: {{ $labels.namespace }}` |
+| Summary | `Kasten backup failures detected` |
+| Description | `One or more Kasten backup actions have failed.` |
 
 3. Save the rule.
 
-4. Test by triggering another backup failure (remove the VolumeSnapshotClass annotation again and run a policy):
-   ```bash
-   kubectl annotate volumesnapshotclass csi-hostpath-snapclass k10.kasten.io/is-snapshot-class-
-   # Run a backup (will fail)
-   # Wait a few minutes
-   # Check Mailhog for the alert email
-   # Re-enable: kubectl annotate volumesnapshotclass csi-hostpath-snapclass k10.kasten.io/is-snapshot-class="true"
-   ```
+> **Why `sum(...)` and not `increase(...)`?** `catalog_actions_count` is a **gauge** (not a Prometheus counter), so `increase()` is not appropriate. The failed count is cumulative — once a failure is recorded, the gauge never decreases for that status. Use `sum(...) > 0` to alert whenever any failure exists in the current Prometheus scrape.
+
+### 5b. Create via kubectl/API (alternative)
+
+```bash
+GRAFANA_PASSWORD=$(kubectl get secret grafana -n monitoring \
+  -o jsonpath="{.data.admin-password}" | base64 --decode)
+DS_UID=$(curl -s -u "admin:${GRAFANA_PASSWORD}" \
+  http://localhost:3000/api/datasources/name/Kasten-Prometheus | jq -r '.uid')
+FOLDER_UID=$(curl -s -X POST "http://localhost:3000/api/folders" \
+  -u "admin:${GRAFANA_PASSWORD}" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Kasten Alerts"}' | jq -r '.uid')
+
+curl -s -X PUT \
+  "http://localhost:3000/api/v1/provisioning/folder/${FOLDER_UID}/rule-groups/kasten-alerts" \
+  -u "admin:${GRAFANA_PASSWORD}" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"title\": \"kasten-alerts\",
+    \"interval\": 60,
+    \"rules\": [{
+      \"title\": \"Kasten Backup Failure\",
+      \"condition\": \"C\",
+      \"data\": [
+        {\"refId\":\"A\",\"relativeTimeRange\":{\"from\":600,\"to\":0},
+         \"datasourceUid\":\"${DS_UID}\",
+         \"model\":{\"expr\":\"sum(catalog_actions_count{type=\\\"backup\\\",status=\\\"failed\\\"})\",\"refId\":\"A\",\"range\":true}},
+        {\"refId\":\"B\",\"datasourceUid\":\"__expr__\",
+         \"model\":{\"type\":\"reduce\",\"refId\":\"B\",\"expression\":\"A\",\"reducer\":\"last\"}},
+        {\"refId\":\"C\",\"datasourceUid\":\"__expr__\",
+         \"model\":{\"type\":\"threshold\",\"refId\":\"C\",
+                    \"conditions\":[{\"evaluator\":{\"type\":\"gt\",\"params\":[0]}}],
+                    \"expression\":\"B\"}}
+      ],
+      \"noDataState\": \"OK\",
+      \"execErrState\": \"Error\",
+      \"for\": \"1m\",
+      \"labels\": {\"severity\": \"critical\"},
+      \"annotations\": {
+        \"summary\": \"Kasten backup failures detected\",
+        \"description\": \"One or more Kasten backup actions have failed.\"
+      },
+      \"notification_settings\": {\"receiver\": \"email-alerts\"}
+    }]
+  }" | jq '.title'
+```
+
+> **Note:** The rule-group `PUT` API requires `interval` to be set (in seconds, divisible by 10). The per-rule API (`POST /api/v1/provisioning/alert-rules`) returns an error "interval should be non-zero" if you forget this — use the rule-group endpoint instead.
+
+### 5c. Test the alert
+
+```bash
+# Remove snapshot class annotation to cause backup failure
+kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
+  k10.kasten.io/is-snapshot-class-
+
+# Trigger a backup (will fail because no snapshot class is registered)
+cat <<EOF | kubectl apply -f -
+kind: RunAction
+apiVersion: actions.kio.kasten.io/v1alpha1
+metadata:
+  name: alert-test-run
+  namespace: kasten-io
+  labels:
+    k10.kasten.io/policyName: mongodb-backup
+    k10.kasten.io/policyNamespace: kasten-io
+spec:
+  subject:
+    apiVersion: config.kio.kasten.io/v1alpha1
+    kind: Policy
+    name: mongodb-backup
+    namespace: kasten-io
+EOF
+
+# Wait ~2 minutes for Prometheus to scrape and Grafana to evaluate the rule
+# Check Mailhog for the alert email
+curl -s http://localhost:8025/api/v2/messages | jq '[.items[].Content.Headers.Subject[0]]'
+
+# Restore the snapshot class annotation
+kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
+  k10.kasten.io/is-snapshot-class="true"
+```
 
 ---
 
@@ -367,9 +512,11 @@ curl -s "http://localhost:8080/k10/prometheus/api/v1/query" \
 ## This workshop has challenges
 
 - **Grafana is no longer embedded in Kasten (removed in 7.5.0).** You must install it separately (see Part 3). Any older instruction referencing `http://localhost:8080/k10/grafana` will return 404 on Kasten 7.5.0+. All Grafana steps in this workshop use the external Grafana at `http://localhost:3000`.
+- **Kasten Prometheus returns HTTP 401 when OIDC is enabled.** The Kasten gateway enforces authentication on all routes including `/k10/prometheus/`. If you enabled OIDC in Workshop 5, you must disable it before this workshop: `helm upgrade k10 kasten/k10 --namespace kasten-io --reuse-values --set auth.oidcAuth.enabled=false --wait`. Alternatively, port-forward directly to the Prometheus pod: `kubectl port-forward svc/prometheus-server -n kasten-io 9090:80 &` (no auth required at the Prometheus level itself).
 - **Connecting external Grafana to Kasten Prometheus** requires using the cluster-internal Kasten gateway URL (`http://gateway.kasten-io.svc.cluster.local/k10/prometheus`) as the data source URL. The gateway service listens on port 80 inside the cluster (port 8000 is only for NodePort external access). Using `localhost:8080/k10/prometheus` will fail because Grafana runs inside the cluster and cannot resolve `localhost` to your port-forward.
-- **Grafana alert evaluation requires a Grafana-managed alert rule group.** If you mix "Grafana-managed" and "Mimir/Loki-managed" rule types, the alerts may not fire as expected. Always create alert rules under **Alerting → Alert Rules → + New Alert Rule** (not via the panel "Create alert" button, which sometimes creates panel-linked rules that are harder to configure).
-- **The `catalog_actions_count` gauge** does not behave like a Prometheus counter — it fluctuates as RestorePoints are created and retired. Using `increase()` on it will not work reliably. For failure detection, filter on `{status="failed"}` and check if the value is non-zero, as shown in Part 5.
+- **The `grafana\.ini.smtp.*` Helm set keys require a backslash-escaped dot.** The Grafana chart stores all INI config under a key literally named `grafana.ini` (with a dot). In Helm `--set` syntax, a dot means nested key, so you must escape it: `--set 'grafana\.ini.smtp.enabled=true'`. Without the backslash, `--set grafana.ini.smtp.enabled=true` creates a `grafana > ini > smtp` nested structure which the chart ignores silently — `curl .../api/admin/settings | jq '.smtp.enabled'` returns `"false"` even though `helm get values` shows the setting.
+- **Grafana alert rules require an `interval` set on the rule group.** The per-rule POST API (`/api/v1/provisioning/alert-rules`) rejects rules with `interval: 0` with "interval (0s) should be non-zero and divided exactly by scheduler interval: 10". Use the rule-group PUT API (`/api/v1/provisioning/folder/<uid>/rule-groups/<group>`) which lets you set `interval` at the group level — this is the only API path that works without a pre-existing group.
+- **The `catalog_actions_count` is a gauge, not a counter.** Using `increase()` on it will give misleading results. The failed-action count is cumulative and never decreases for `status="failed"`. Use `sum(catalog_actions_count{status="failed"}) > 0` as the alert condition. The alert will remain firing as long as any historical failure exists — which is intentional: Kasten failures must be acknowledged and resolved, not aged out.
 - **Mailhog is no longer maintained** (archived on GitHub). It works for local testing, but consider [Mailpit](https://mailpit.axllent.org/) as a modern replacement. Both accept SMTP on port 1025 so the Grafana contact point configuration is the same.
 
 ---
@@ -387,4 +534,4 @@ curl -s "http://localhost:8080/k10/prometheus/api/v1/query" \
 - By default, Kasten's Prometheus retains 30 days of metrics in 8 GiB of storage. Adjust via Helm: `--set prometheus.server.retention=60d --set prometheus.server.persistentVolume.size=20Gi`
 - Grafana alert routing: the **Notification Policy** tree routes alerts to contact points based on label matchers. The default root policy catches all unmatched alerts — set your email contact point there to receive all Kasten alerts.
 - Grafana supports Slack, PagerDuty, OpsGenie, Teams, and webhook contact points in addition to email — production environments should use an on-call integration.
-- `increase(metric[5m])` calculates the increase in a counter over the last 5 minutes — useful for detecting new failures without alerting on cumulative historical counts.
+- `catalog_actions_count{status="failed"}` is a gauge that accumulates total failures and never resets to zero. `sum(...) > 0` fires as long as any failure is recorded. This is intentional — Kasten failure metrics persist until Kasten is restarted so operators cannot miss them.
