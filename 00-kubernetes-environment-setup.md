@@ -216,7 +216,7 @@ spec:
 EOF
 
 kubectl wait volumesnapshot/test-snapshot --for=jsonpath='{.status.readyToUse}'=true --timeout=60s
-echo "Snapshot test passed!"
+echo 'Snapshot test passed!'
 
 # Clean up
 kubectl delete volumesnapshot test-snapshot
