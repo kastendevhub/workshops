@@ -45,22 +45,66 @@ For production multi-tenant clusters, **OIDC** or **LDAP** is recommended.
 
 ## Step 1 — Deploy Keycloak
 
-Keycloak is an open-source OIDC identity provider. Deploy it locally:
+Keycloak is an open-source OIDC identity provider. Deploy it using the official image from `quay.io`:
+
+> **Note:** The Bitnami Keycloak Helm chart images are no longer available via `docker.io/bitnami` (deprecated in 2025). Use the official Keycloak image from `quay.io/keycloak/keycloak` directly.
 
 ```bash
-# Create namespace and deploy Keycloak via Helm
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm repo update
-
 kubectl create namespace keycloak
 
-helm install keycloak bitnami/keycloak \
-  --namespace keycloak \
-  --set auth.adminUser=kcadmin \
-  --set auth.adminPassword=kcadmin \
-  --set service.type=NodePort \
-  --set service.nodePorts.http=32020 \
-  --wait
+cat <<'EOF' | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+      - name: keycloak
+        image: quay.io/keycloak/keycloak:24.0
+        args: ["start-dev"]
+        env:
+        - name: KEYCLOAK_ADMIN
+          value: kcadmin
+        - name: KEYCLOAK_ADMIN_PASSWORD
+          value: kcadmin
+        - name: KC_HOSTNAME_STRICT
+          value: "false"
+        - name: KC_HTTP_ENABLED
+          value: "true"
+        - name: KC_HOSTNAME_URL
+          value: "http://host.docker.internal:8082"
+        - name: KC_HOSTNAME_ADMIN_URL
+          value: "http://host.docker.internal:8082"
+        ports:
+        - containerPort: 8080
+          name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+  - port: 80
+    targetPort: 8080
+    nodePort: 32020
+  type: NodePort
+EOF
+
+kubectl wait deployment/keycloak -n keycloak --for=condition=Available --timeout=180s
 ```
 
 Port-forward for local access:
@@ -68,9 +112,17 @@ Port-forward for local access:
 kubectl port-forward svc/keycloak -n keycloak 8082:80 &
 ```
 
+Wait for Keycloak to start (it takes about 15 seconds):
+```bash
+until kubectl logs deployment/keycloak -n keycloak 2>/dev/null | grep -q "started in"; do sleep 3; done
+echo "Keycloak ready"
+```
+
 Access Keycloak admin console at [http://localhost:8082/admin/](http://localhost:8082/admin/) using `kcadmin`/`kcadmin`.
 
-> **Note:** Keycloak 17+ (Quarkus-based) removed the `/auth/` context path prefix. The admin console is now at `/admin/`, not `/auth/admin/`. All older URLs with `/auth/` will return 404.
+> **Important:** Setting `KC_HOSTNAME_URL=http://host.docker.internal:8082` makes Keycloak issue tokens with an issuer that is reachable from both the browser (via port-forward on 8082) and Kasten pods (via Docker Desktop's `host.docker.internal`). Without this setting, the issuer URL will use whatever hostname the request was made with, creating a mismatch between the browser's redirect URL and Kasten's token validation.
+
+> **Note:** Keycloak `start-dev` mode uses an **in-memory H2 database**. All realm configuration is lost if the pod restarts. For persistent Keycloak in a training environment, add `--set db.type=dev-file` or use a PostgreSQL database. In this workshop we rely on the pod staying running throughout the session.
 
 ---
 
@@ -102,7 +154,9 @@ Create four groups under `k10lab-realm`:
 | `dev-1@k10.lab` | `password` | `idp-app1devs`, `idp-app2devs` |
 | `dev-2@k10.lab` | `password` | `idp-app2devs` |
 
-Set password as non-temporary for each user.
+Set password as non-temporary for each user. Also set **First name** and **Last name** for each user — Keycloak 24.x requires a complete profile (`firstName` + `lastName`) before allowing the `password` grant type. Without them, login will fail with "Account is not fully set up".
+
+Also ensure **Email verified** is toggled on for each user.
 
 ### 2d. Create the Kasten Client
 
@@ -155,7 +209,6 @@ helm install mongo-app1 bitnami/mongodb \
   --namespace app-1 \
   --set architecture=standalone \
   --set persistence.size=1Gi \
-  --version 13.6.7 \
   --wait
 
 # Deploy MongoDB in app-2 namespace
@@ -164,7 +217,6 @@ helm install mongo-app2 bitnami/mongodb \
   --namespace app-2 \
   --set architecture=standalone \
   --set persistence.size=1Gi \
-  --version 13.6.7 \
   --wait
 ```
 
@@ -175,8 +227,9 @@ helm install mongo-app2 bitnami/mongodb \
 Reinstall (or upgrade) Kasten with OIDC parameters:
 
 ```bash
-# Get Keycloak OIDC configuration
-OIDC_ISSUER="http://localhost:8082/realms/k10lab-realm"
+# The OIDC issuer must use host.docker.internal so it is reachable from both
+# the browser (via port-forward 8082) and Kasten pods (Docker Desktop bridge).
+OIDC_ISSUER="http://host.docker.internal:8082/realms/k10lab-realm"
 
 # Get the Kasten client secret from Keycloak:
 # Keycloak admin → Clients → Kasten → Credentials → Client Secret
@@ -185,15 +238,16 @@ OIDC_CLIENT_SECRET="<paste client secret from Keycloak>"
 
 helm upgrade --install k10 kasten/k10 \
   --namespace kasten-io \
+  --reuse-values \
   --set auth.oidcAuth.enabled=true \
   --set auth.oidcAuth.providerURL="${OIDC_ISSUER}" \
-  --set auth.oidcAuth.redirectURL="http://localhost:8080/k10/auth-svc/v0/oidc/redirect" \
-  --set auth.oidcAuth.scopes="groups profile email" \
-  --set auth.oidcAuth.prompt="select_account" \
-  --set auth.oidcAuth.clientID="Kasten" \
+  --set "auth.oidcAuth.redirectURL=http://localhost:8080" \
+  --set "auth.oidcAuth.scopes=groups profile email" \
+  --set auth.oidcAuth.prompt=select_account \
+  --set auth.oidcAuth.clientID=Kasten \
   --set auth.oidcAuth.clientSecret="${OIDC_CLIENT_SECRET}" \
-  --set auth.oidcAuth.usernameClaim="email" \
-  --set auth.oidcAuth.groupClaim="groups" \
+  --set auth.oidcAuth.usernameClaim=email \
+  --set auth.oidcAuth.groupClaim=groups \
   --wait
 ```
 
@@ -210,8 +264,10 @@ Kasten uses standard Kubernetes `ClusterRole` and `RoleBinding` objects for acce
 | Kasten ClusterRole | Permissions |
 |-------------------|------------|
 | `k10-admin` | Full access to all Kasten APIs |
-| `k10-basic` | Read-only access |
-| `k10-ns-admin` | Manage policies and restores for a specific namespace |
+| `k10-basic` | Can create backups, restores, and policies within a namespace |
+| `k10-config-view` | Read-only view of Kasten configuration |
+
+> **Note:** `k10-ns-admin` no longer exists in Kasten 8.x. For namespace-scoped admin access, bind `k10-admin` using a namespaced `RoleBinding` (not a `ClusterRoleBinding`). This gives full Kasten admin rights within that namespace only.
 
 ### 6a. Grant admin access to the OIDC admin group
 
@@ -247,7 +303,7 @@ subjects:
   apiGroup: rbac.authorization.k8s.io
 roleRef:
   kind: ClusterRole
-  name: k10-ns-admin
+  name: k10-admin
   apiGroup: rbac.authorization.k8s.io
 EOF
 ```
@@ -311,21 +367,24 @@ metadata:
   namespace: kasten-io
 spec:
   comment: "Gold SLA: hourly backups, exported, 30-day retention"
-  frequency: "@hourly"
-  retention:
-    hourly: 24
-    daily: 30
-    weekly: 12
-    monthly: 12
-    yearly: 7
-  actions:
-  - action: backup
-  - action: export
-    exportParameters:
-      frequency: "@hourly"
-      exportData:
-        enabled: true
-    retention: {}
+  backup:
+    frequency: "@hourly"
+    retention:
+      hourly: 24
+      daily: 30
+      weekly: 12
+      monthly: 12
+      yearly: 7
+  export:
+    frequency: "@hourly"
+    profile:
+      name: s3-local
+      namespace: kasten-io
+    exportData:
+      enabled: true
+    retention:
+      hourly: 24
+      daily: 30
 ---
 kind: PolicyPreset
 apiVersion: config.kio.kasten.io/v1alpha1
@@ -334,20 +393,23 @@ metadata:
   namespace: kasten-io
 spec:
   comment: "Silver SLA: daily backups, exported, 7-day retention"
-  frequency: "@daily"
-  retention:
-    daily: 7
-    weekly: 4
-    monthly: 12
-    yearly: 7
-  actions:
-  - action: backup
-  - action: export
-    exportParameters:
-      frequency: "@daily"
-      exportData:
-        enabled: true
-    retention: {}
+  backup:
+    frequency: "@daily"
+    retention:
+      daily: 7
+      weekly: 4
+      monthly: 12
+      yearly: 7
+  export:
+    frequency: "@daily"
+    profile:
+      name: s3-local
+      namespace: kasten-io
+    exportData:
+      enabled: true
+    retention:
+      daily: 7
+      weekly: 4
 EOF
 ```
 
@@ -362,8 +424,8 @@ Log out and log back in as different users to verify access:
 | User | Expected Kasten Access |
 |------|----------------------|
 | `lab-admin@k10.lab` | Full dashboard access, all namespaces |
-| `db-admin@k10.lab` | Only `app-1` namespace visible, can create policies |
-| `dev-1@k10.lab` | Only `app-1` namespace visible, read-only |
+| `db-admin@k10.lab` | Only `app-1` namespace visible, can create/manage policies |
+| `dev-1@k10.lab` | Only `app-1` namespace visible, can trigger backups/restores |
 | `dev-2@k10.lab` | No namespaces visible (no bindings) |
 
 ---
@@ -375,7 +437,7 @@ Log out and log back in as different users to verify access:
 | 1 | Navigate to Kasten dashboard | Keycloak login page shown (OIDC redirect) |
 | 2 | Login as `lab-admin@k10.lab` | Dashboard accessible, all namespaces visible |
 | 3 | Login as `db-admin@k10.lab` | Only `app-1` visible |
-| 4 | Login as `dev-1@k10.lab` | `app-1` visible, read-only (no create buttons) |
+| 4 | Login as `dev-1@k10.lab` | `app-1` visible, can trigger backups/restores |
 | 5 | `kubectl get clusterrolebinding k10-idp-admins` | Binding exists |
 | 6 | `kubectl get rolebinding -n app-1` | `k10-dbadmin-app1` and `k10-dev1-app1` exist |
 | 7 | `kubectl get policypreset -n kasten-io` | `gold-sla` and `silver-sla` present |
@@ -385,10 +447,15 @@ Log out and log back in as different users to verify access:
 
 ## This workshop has challenges
 
-- **Keycloak URL changes (breaking).** The current Bitnami Keycloak chart uses Keycloak 17+ (Quarkus-based), which removed the `/auth/` path prefix. The admin console is at `/admin/` and the OIDC issuer is at `/realms/<realm>`. Any older instruction referencing `/auth/admin/` or `/auth/realms/` will produce a 404. All URLs in this workshop have been updated accordingly.
-- **The OIDC Debugger ([https://oidcdebugger.com/](https://oidcdebugger.com/)) cannot reach `localhost:8082`.** The OIDC Debugger performs the authorization redirect from its own cloud server, which cannot reach your laptop's port-forwarded Keycloak. Use the debugger only to understand the flow conceptually, or test with `curl` directly as shown. As a workaround, you can use a local tunnel tool (e.g. `ngrok http 8082`) to expose your local Keycloak publicly, then use that URL in the debugger.
-- **Keycloak startup can be slow** on resource-constrained laptops. The Bitnami chart uses resource limits by default. If the Keycloak pod stays in `0/1 Running` with readiness probe failures, wait up to 5 minutes or increase Docker Desktop memory.
-- **OIDC redirect URL must match exactly.** The `redirectURL` in the Helm upgrade command must match what is registered as a Valid Redirect URI in Keycloak. Even a trailing slash difference will cause the OIDC flow to fail with an "invalid redirect_uri" error. If you see this error, double-check both the Helm value and the Keycloak client configuration.
+- **Bitnami Keycloak images are no longer available on docker.io (deprecated 2025).** The `helm install bitnami/keycloak` approach results in `ErrImagePull`. Use the official `quay.io/keycloak/keycloak:24.0` image with a custom Deployment and Service as shown in Step 1.
+- **Keycloak URL changes (breaking).** Keycloak 17+ (Quarkus-based) removed the `/auth/` context path prefix. The admin console is at `/admin/` and the OIDC issuer is at `/realms/<realm>`. Older instructions referencing `/auth/admin/` or `/auth/realms/` will return 404.
+- **The OIDC issuer URL must be reachable from both the browser and Kasten pods.** If `providerURL` uses `localhost`, Kasten pods cannot reach it. If it uses the Kubernetes ClusterIP DNS (e.g. `keycloak.keycloak.svc.cluster.local`), the browser cannot follow the OIDC redirect. Solution: configure Keycloak with `KC_HOSTNAME_URL=http://host.docker.internal:8082` — `host.docker.internal` resolves to the Docker Desktop host from inside containers (port-forwarded to 8082), and to the same host from the browser via `localhost:8082`. Set `providerURL=http://host.docker.internal:8082/realms/k10lab-realm`.
+- **The `redirectURL` Helm value must be just the base URL.** Set `auth.oidcAuth.redirectURL=http://localhost:8080` (not `http://localhost:8080/k10/auth-svc/v0/oidc/redirect`). Kasten appends the path suffix automatically. Setting the full path produces a doubled URL like `.../oidc/redirect/k10/auth-svc/v0/oidc/redirect` which Keycloak rejects.
+- **Keycloak 24.x requires `firstName` + `lastName` for the password grant type.** Users created without first/last name fail login with "Account is not fully set up" even with `requiredActions: []` and `emailVerified: true`. Always set `firstName`, `lastName`, and `emailVerified: true` when creating users.
+- **`k10-ns-admin` does not exist in Kasten 8.x.** The role was removed. For namespace-scoped admin access, create a `RoleBinding` (not `ClusterRoleBinding`) referencing `k10-admin`. This grants full Kasten admin rights scoped to that namespace only.
+- **`PolicyPreset` API changed in Kasten 8.x.** The top-level `frequency`, `retention`, and `actions` fields were replaced by nested `backup` and `export` sub-objects. The old format is rejected with "unknown field" errors.
+- **Keycloak `start-dev` mode is stateless — all config is lost on pod restart.** If the Keycloak pod restarts, all realms/users/clients must be recreated. For training purposes this is acceptable, but be aware that a cluster node restart will wipe your OIDC configuration.
+- **The OIDC Debugger ([https://oidcdebugger.com/](https://oidcdebugger.com/)) cannot reach `localhost:8082`.** The debugger performs the redirect from its cloud server, which cannot reach your local port-forward. Use it conceptually only, or expose Keycloak publicly via `ngrok http 8082`.
 
 ---
 
