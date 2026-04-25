@@ -307,35 +307,26 @@ helm install k10 kasten/k10 \
 
 ### 6c. Restore the Kasten catalog
 
-Use the `k10-restore` Helm chart to restore the catalog from the exported DR backup:
+The recommended approach since Kasten 7.5.0 is the dashboard **Disaster Recovery** restore flow:
 
+1. Expose the Kasten dashboard on the recovery cluster (same NodePort + port-forward as Workshop 1 Step 3).
+2. Open the Kasten dashboard and navigate to **Settings → Disaster Recovery → Restore Kasten Backup**.
+3. Enter your object store credentials:
+   - Cloud Storage Provider: S3 Compatible
+   - S3 Endpoint: `http://minio.minio.svc.cluster.local:9000`
+   - Access Key: `minioadmin`
+   - Secret Key: `minioadmin`
+   - Bucket: `lab-bucket-immutable`
+4. Enter your **passphrase**.
+5. The dashboard lists available DR backups from the `k10-dr/` prefix — select the most recent.
+6. Click **Restore** and wait for completion.
+
+You can list available DR backups with `mc` to identify the correct one:
 ```bash
-helm install k10-restore kasten/k10restore \
-  --namespace kasten-io \
-  --set "metering.mode=airgap" \
-  --set "auth.tokenAuth.enabled=true" \
-  --set "externalGateway.create=true" \
-  --set "k10.drBackupRef=<your-backup-id>" \
-  --set "secrets.passPhrase=<your-passphrase>" \
-  --set "profileSecrets.awsAccessKeyId=minioadmin" \
-  --set "profileSecrets.awsSecretAccessKey=minioadmin" \
-  --set "profile.location.objectStore.endpoint=http://minio.minio.svc.cluster.local:9000" \
-  --set "profile.location.objectStore.name=lab-bucket-immutable" \
-  --set "profile.location.objectStore.objectStoreType=S3" \
-  --wait
+mc ls local/lab-bucket-immutable/k10-dr/
 ```
 
-> **Note:** The `k10.drBackupRef` value is the catalog backup path shown in your object store under the `k10-dr/` prefix. You can list available DR backups:
-> ```bash
-> mc ls local/lab-bucket-immutable/k10-dr/
-> ```
-
-Alternatively, use the Kasten dashboard's built-in **Disaster Recovery** restore flow:
-
-1. Open the new cluster's Kasten dashboard.
-2. **Settings → Disaster Recovery → Restore from DR backup**
-3. Enter your location profile credentials and passphrase.
-4. Select the catalog backup to restore.
+> **Note:** The `k10restore` Helm chart is **deprecated since Kasten 7.5.0** and will be removed in a future release. Use the dashboard approach above. If you need the Helm-based method for scripting, see the [Kasten DR documentation](https://docs.kasten.io/latest/operating/dr.html) for the current CRD-based `KastenDRRestore` approach.
 
 ### 6d. Restore Applications
 
@@ -375,6 +366,15 @@ kubectl exec -it mysql-0 -n mysql -- \
 | 6 | After recovery: `kubectl get pods -n mysql` | MySQL running |
 | 7 | After recovery: MongoDB query | `card` and `dice` records returned |
 | 8 | After recovery: MySQL query | `Puffball` record returned |
+
+---
+
+## This workshop has challenges
+
+- **The DR passphrase is irreplaceable.** Losing it means the catalog backup cannot be decrypted — full cluster recovery becomes impossible. Store it in a secrets manager (e.g. `pass`, Bitwarden, HashiCorp Vault) *before* running the DR exercise. Tip: `export DR_PASSPHRASE="my-secret"; echo $DR_PASSPHRASE` and keep your terminal open.
+- **The `k10restore` Helm chart is deprecated (since Kasten 7.5.0).** If you have existing instructions referencing `helm install k10restore kasten/k10restore`, follow the dashboard UI restore flow described in Step 6c instead. The Helm chart still works for now but will be removed in a future release.
+- **Running two Kind clusters simultaneously is resource-intensive.** Each cluster needs approximately 4–6 GB of RAM. Docker Desktop must have at least 12 GB allocated. If pods stay `Pending`, increase Docker Desktop memory in Settings → Resources → Memory.
+- **After deleting Kasten (`helm uninstall k10 -n kasten-io`), the `kasten-io` namespace may take 1–3 minutes to fully terminate** due to finalizers on Kasten CRDs. Wait for `kubectl get namespace kasten-io` to disappear before recreating it.
 
 ---
 

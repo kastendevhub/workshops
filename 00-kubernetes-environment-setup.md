@@ -62,7 +62,7 @@ The [CSI Hostpath Driver](https://github.com/kubernetes-csi/csi-driver-host-path
 git clone https://github.com/kubernetes-csi/csi-driver-host-path.git
 cd csi-driver-host-path
 
-# Deploy the driver (tested against v1.13.x)
+# Deploy the driver — kubernetes-latest is a symlink to the most recent supported k8s version (currently kubernetes-1.31)
 ./deploy/kubernetes-latest/deploy.sh
 
 cd ..

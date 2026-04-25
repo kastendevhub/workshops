@@ -68,7 +68,9 @@ Port-forward for local access:
 kubectl port-forward svc/keycloak -n keycloak 8082:80 &
 ```
 
-Access Keycloak admin console at [http://localhost:8082/auth/admin/](http://localhost:8082/auth/admin/) using `kcadmin`/`kcadmin`.
+Access Keycloak admin console at [http://localhost:8082/admin/](http://localhost:8082/admin/) using `kcadmin`/`kcadmin`.
+
+> **Note:** Keycloak 17+ (Quarkus-based) removed the `/auth/` context path prefix. The admin console is now at `/admin/`, not `/auth/admin/`. All older URLs with `/auth/` will return 404.
 
 ---
 
@@ -129,7 +131,7 @@ Before installing Kasten, test the OIDC flow using the public [OIDC Debugger](ht
 
 1. Get the authorization endpoint:
    ```bash
-   curl -s http://localhost:8082/auth/realms/k10lab-realm/.well-known/openid-configuration \
+   curl -s http://localhost:8082/realms/k10lab-realm/.well-known/openid-configuration \
      | jq -r '.authorization_endpoint'
    ```
 
@@ -174,7 +176,7 @@ Reinstall (or upgrade) Kasten with OIDC parameters:
 
 ```bash
 # Get Keycloak OIDC configuration
-OIDC_ISSUER="http://localhost:8082/auth/realms/k10lab-realm"
+OIDC_ISSUER="http://localhost:8082/realms/k10lab-realm"
 
 # Get the Kasten client secret from Keycloak:
 # Keycloak admin → Clients → Kasten → Credentials → Client Secret
@@ -378,6 +380,15 @@ Log out and log back in as different users to verify access:
 | 6 | `kubectl get rolebinding -n app-1` | `k10-dbadmin-app1` and `k10-dev1-app1` exist |
 | 7 | `kubectl get policypreset -n kasten-io` | `gold-sla` and `silver-sla` present |
 | 8 | OIDC Debugger ID token | `groups` claim present with user's groups |
+
+---
+
+## This workshop has challenges
+
+- **Keycloak URL changes (breaking).** The current Bitnami Keycloak chart uses Keycloak 17+ (Quarkus-based), which removed the `/auth/` path prefix. The admin console is at `/admin/` and the OIDC issuer is at `/realms/<realm>`. Any older instruction referencing `/auth/admin/` or `/auth/realms/` will produce a 404. All URLs in this workshop have been updated accordingly.
+- **The OIDC Debugger ([https://oidcdebugger.com/](https://oidcdebugger.com/)) cannot reach `localhost:8082`.** The OIDC Debugger performs the authorization redirect from its own cloud server, which cannot reach your laptop's port-forwarded Keycloak. Use the debugger only to understand the flow conceptually, or test with `curl` directly as shown. As a workaround, you can use a local tunnel tool (e.g. `ngrok http 8082`) to expose your local Keycloak publicly, then use that URL in the debugger.
+- **Keycloak startup can be slow** on resource-constrained laptops. The Bitnami chart uses resource limits by default. If the Keycloak pod stays in `0/1 Running` with readiness probe failures, wait up to 5 minutes or increase Docker Desktop memory.
+- **OIDC redirect URL must match exactly.** The `redirectURL` in the Helm upgrade command must match what is registered as a Valid Redirect URI in Keycloak. Even a trailing slash difference will cause the OIDC flow to fail with an "invalid redirect_uri" error. If you see this error, double-check both the Helm value and the Keycloak client configuration.
 
 ---
 

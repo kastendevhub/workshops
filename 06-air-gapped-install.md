@@ -237,33 +237,34 @@ kubectl delete pod airgapped-test
 
 ## Part 5 — Mirror Kasten Images to the Private Registry
 
+> **Note:** The `k10offline` tool was deprecated in Kasten 7.5.0 and replaced by `k10tools image`. The new tool ships as a container image — no binary download needed.
+
 ```bash
-# Get the Kasten version you want to install
-K10_VERSION="6.5.4"  # or check latest at https://docs.kasten.io
+# Determine the Kasten version (same version used for the Helm install)
+K10_VERSION=$(helm search repo kasten/k10 --output json | jq -r '.[0].app_version')
+echo "Kasten version: $K10_VERSION"
 
-# Use the Kasten offline image tool
-# Download the image list and pull/push script
-wget "https://github.com/kastenhq/external-tools/releases/download/${K10_VERSION}/k10offline_${K10_VERSION}_linux_amd64.tar.gz"
-tar -xf k10offline_*.tar.gz
-chmod +x k10offline
-
-# Pull Kasten images and push to private registry
-./k10offline pull --username testuser \
-                  --password testpassword \
-                  --registry ${REGISTRY} \
-                  --image-tag ${K10_VERSION}
+# Use k10tools to copy all Kasten images to the private registry
+# k10tools handles image discovery, pulling, retagging and pushing automatically
+docker run --rm \
+  gcr.io/kasten-images/k10tools:${K10_VERSION} \
+  image copy \
+  --registry ${REGISTRY} \
+  --username testuser \
+  --password testpassword \
+  --insecure-registry
 ```
 
-> **Alternative manual approach** — if `k10offline` is not available:
+> **Alternative manual approach** — if you need to mirror images without running a container (fully air-gapped host):
 > ```bash
-> # Pull Kasten images from the official registry
-> docker pull gcr.io/kasten-images/executor:${K10_VERSION}
-> docker pull gcr.io/kasten-images/datamover:${K10_VERSION}
-> # ... (repeat for all required Kasten images)
+> # List all images required by the current Kasten version
+> docker run --rm gcr.io/kasten-images/k10tools:${K10_VERSION} image list
 >
-> # Retag and push to private registry
+> # For each image in the list, pull, retag and push:
+> docker pull gcr.io/kasten-images/executor:${K10_VERSION}
 > docker tag gcr.io/kasten-images/executor:${K10_VERSION} ${REGISTRY}/executor:${K10_VERSION}
 > docker push ${REGISTRY}/executor:${K10_VERSION}
+> # ... (repeat for all images — the list changes with each release, so always use `image list`)
 > ```
 
 ---
@@ -375,10 +376,20 @@ You should see Kasten's encrypted backup artifacts.
 
 ---
 
+## This workshop has challenges
+
+- **`k10offline` is deprecated (since Kasten 7.5.0).** Use `k10tools image copy` (a container image) instead, as shown in Part 5. If you find older instructions or scripts referencing `k10offline pull`, they will fail on Kasten 7.5.0+.
+- **NFS on macOS via Docker has complex networking.** The `erichough/nfs-server` container runs in the Docker bridge network. The kind node containers run in the same bridge network and can reach NFS at the container's Docker IP — but only if the NFS server container started correctly with `--privileged`. Confirm with `docker logs nfs-server` and test the mount from inside the kind node as described in Part 1.
+- **Configuring containerd in the kind node** requires exec-ing into the node container and writing a `hosts.toml` file manually. The exact path changed between kind/containerd versions. If the pod still fails to pull from your registry after `systemctl restart containerd`, verify the path with `ls /etc/containerd/certs.d/` inside the node container.
+- **Image mirroring is slow on a laptop network.** Kasten has dozens of container images. `k10tools image copy` may take 10–20 minutes depending on your download speed. Plan for this before the session.
+- **`k10tools image copy --insecure-registry`** is needed when the private registry uses HTTP (no TLS), which is the case in this workshop. In production, use a registry with a valid TLS certificate.
+
+---
+
 ## Tips & References
 
 - [Kasten air-gapped install documentation](https://docs.kasten.io/latest/install/advanced.html#airgapped-install)
-- [k10offline tool releases](https://github.com/kastenhq/external-tools/releases)
+- [k10tools image documentation](https://docs.kasten.io/latest/install/offline.html) — `k10tools` replaced `k10offline` in Kasten 7.5.0
 - [Docker Registry deployment guide](https://docs.docker.com/registry/deploying/)
 - [Kasten NFS Location Profile](https://docs.kasten.io/latest/usage/configuration.html#nfs-file-store)
 - In production, the private registry would typically be secured with a valid TLS certificate (not `skip_verify`). Tools like JFrog Artifactory, Harbor, or AWS ECR are common enterprise choices.

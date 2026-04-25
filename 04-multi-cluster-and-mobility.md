@@ -39,7 +39,7 @@ Transforms allow you to modify application metadata (StorageClass, annotations, 
 - Kasten installed on **both** clusters
 - `s3-local` Location Profile exists on the East cluster
 - MongoDB with sample data running in `mongodb` namespace on East
-- `k10multicluster` CLI tool (downloaded during the exercise below)
+- Access to both cluster dashboards (port-forwarded to different local ports)
 
 ---
 
@@ -87,71 +87,82 @@ kubectl config use-context kind-kasten-training
 
 ---
 
-## Step 2 — Bootstrap Multi-Cluster on the East (Primary)
+## Step 2 — Enable Multi-Cluster Manager on the East (Primary)
 
-Download the `k10multicluster` tool:
+> **Note:** The `k10multicluster` CLI tool was deprecated in Kasten 7.0.0. Multi-cluster setup is now done entirely through the Kasten dashboard UI.
 
-```bash
-# Get the Kasten version installed on East
-K10_VERSION=$(helm list -n kasten-io -o json | jq '.[0].app_version' -r)
-echo "Kasten version: $K10_VERSION"
-
-# Download the multi-cluster tool
-wget "https://github.com/kastenhq/external-tools/releases/download/${K10_VERSION}/k10multicluster_${K10_VERSION}_linux_amd64.tar.gz"
-tar -xf k10multicluster_*_linux_amd64.tar.gz
-chmod +x k10multicluster
-```
-
-Bootstrap East as Primary:
+Ensure the East Kasten dashboard is accessible:
 
 ```bash
-# Port-forward East Kasten dashboard
 kubectl port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
-
-./k10multicluster setup-primary \
-  --context=kind-kasten-training \
-  --name=cluster-east \
-  --ingress=http://localhost:8080/k10/
 ```
 
-Open the Multi-Cluster dashboard at [http://localhost:8080/k10/#/clusters](http://localhost:8080/k10/#/clusters).
+In the East Kasten dashboard:
+
+1. Navigate to **Settings → Multi-Cluster Manager**.
+2. Click **Enable Multi-Cluster Manager**.
+3. Enter a name for the primary cluster (e.g. `cluster-east`) and confirm.
+
+The East cluster is now the Multi-Cluster primary. Open the Multi-Cluster dashboard at [http://localhost:8080/k10/#/clusters](http://localhost:8080/k10/#/clusters).
 
 ---
 
 ## Step 3 — Add the West Cluster as Secondary
 
-Get the West cluster's kubeconfig with an externally-accessible API server address:
+First, expose the West Kasten dashboard via a NodePort service and create a service account for the East→West trust relationship:
 
 ```bash
-# On a local kind setup, the API server is accessible via docker network
-# Get the internal IP of the West control plane container
-WEST_IP=$(docker inspect kasten-west-control-plane \
-  --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')
-echo "West control plane IP: $WEST_IP"
+# Create the same NodePort service on West
+cat <<EOF | kubectl --context=kind-kasten-west apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-nodeport
+  namespace: kasten-io
+spec:
+  selector:
+    service: gateway
+  ports:
+  - name: http
+    port: 8000
+    nodePort: 32000
+  type: NodePort
+EOF
 
-# Export kubeconfig with the IP-based server address
-kubectl config view --context=kind-kasten-west --raw \
-  | sed "s|https://127.0.0.1:[0-9]*|https://${WEST_IP}:6443|g" \
-  > west-kubeconfig.yaml
-
-cat west-kubeconfig.yaml
-```
-
-Register the West cluster:
-
-```bash
-# Port-forward West Kasten dashboard on a different port
+# Port-forward West dashboard on a different local port
 kubectl --context=kind-kasten-west \
   port-forward svc/gateway-nodeport -n kasten-io 8081:8000 &
 
-./k10multicluster bootstrap \
-  --primary-context=kind-kasten-training \
-  --primary-name=cluster-east \
-  --secondary-context=kind-kasten-west \
-  --secondary-name=cluster-west \
-  --secondary-ingress=http://localhost:8081/k10/ \
-  --secondary-kubeconfig=west-kubeconfig.yaml
+# Create a service account on West for multi-cluster registration
+kubectl --context=kind-kasten-west create serviceaccount k10-mc-east -n kasten-io
+kubectl --context=kind-kasten-west create clusterrolebinding k10-mc-east \
+  --clusterrole=k10-admin \
+  --serviceaccount=kasten-io:k10-mc-east
+
+# Generate a long-lived token for the service account
+WEST_TOKEN=$(kubectl --context=kind-kasten-west \
+  create token k10-mc-east -n kasten-io --duration=8760h)
+echo "West token: $WEST_TOKEN"
 ```
+
+Get the West Kasten URL that is reachable from East (must use Docker internal IP, not `localhost`):
+
+```bash
+WEST_IP=$(docker inspect kasten-west-control-plane \
+  --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')
+echo "West Kasten URL: http://${WEST_IP}:32000/k10/"
+```
+
+In the **East** Kasten Multi-Cluster dashboard:
+
+1. Click **Add Cluster**.
+2. Fill in:
+   | Field | Value |
+   |-------|-------|
+   | Cluster Name | `cluster-west` |
+   | Kasten URL | `http://<WEST_IP>:32000/k10/` (replace `<WEST_IP>` from above) |
+   | Service Account Token | paste `$WEST_TOKEN` |
+3. Click **Add**.
 
 In the Multi-Cluster dashboard, confirm both `cluster-east` and `cluster-west` appear with a green status.
 
@@ -309,10 +320,20 @@ Both records from East should appear on West.
 
 ---
 
+## This workshop has challenges
+
+- **The `k10multicluster` CLI is deprecated (since Kasten 7.0.0).** All multi-cluster registration is now done via the Kasten dashboard UI. The Steps 2–3 above reflect this. If you find older instructions referencing `k10multicluster setup-primary` or `k10multicluster bootstrap`, they no longer apply.
+- **Kind clusters can only communicate via their Docker bridge network IP, not `localhost`.** The West Kasten URL that East can reach is `http://<WEST_DOCKER_IP>:32000/k10/`. Get the IP with `docker inspect kasten-west-control-plane --format '{{ .NetworkSettings.Networks.kind.IPAddress }}'`. Using `localhost` will cause the connection to fail silently.
+- **Running two Kind clusters simultaneously is resource-intensive.** You need at least 12 GB of RAM allocated to Docker Desktop. If pods are stuck in `Pending`, open Docker Desktop → Settings → Resources → Memory and increase the limit.
+- **Port-forwarding two dashboards at once** (East on 8080, West on 8081) can silently stop working if either `kubectl port-forward` process dies. If you get connection refused on a dashboard, re-run the respective port-forward command.
+- **The receive string for Import Policies** is found in East's dashboard: Applications → `mongodb` → the policy's **Copy Receive String** action. It encodes the bucket path and must be pasted verbatim — any truncation will cause the import to fail with a cryptic error.
+
+---
+
 ## Tips & References
 
 - [Kasten Multi-Cluster documentation](https://docs.kasten.io/latest/multicluster/index.html)
-- [k10multicluster releases](https://github.com/kastenhq/external-tools/releases)
+- [Kasten Multi-Cluster setup guide](https://docs.kasten.io/latest/multicluster/index.html) — the `k10multicluster` CLI (deprecated in 7.0.0) has been replaced by dashboard-based registration
 - [Kasten Transforms documentation](https://docs.kasten.io/latest/usage/migration.html#transforms)
 - [Kasten Import Policy](https://docs.kasten.io/latest/usage/migration.html#import-policy)
 - Multi-Cluster Manager is **optional** for migration — you can configure Export/Import policies independently on each cluster without the MCM UI. MCM simply provides a central management plane.

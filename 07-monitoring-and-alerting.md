@@ -168,27 +168,48 @@ kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
 
 ---
 
-## Part 3 — Access Grafana and Configure Email Alerts
+## Part 3 — Install External Grafana and Configure Email Alerts
 
-### Access Grafana
+> **Important:** Grafana was **removed from the Kasten Helm chart in Kasten 7.5.0**. It must be installed separately. Kasten's embedded Prometheus remains unchanged and continues to collect all metrics.
 
-Grafana is embedded in the Kasten gateway:
+### Install External Grafana
 
 ```bash
-echo "Grafana: http://localhost:8080/k10/grafana"
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+kubectl create namespace monitoring
+
+helm install grafana grafana/grafana \
+  --namespace monitoring \
+  --set persistence.enabled=false \
+  --set service.type=NodePort \
+  --set service.nodePort=32030 \
+  --wait
+
+# Port-forward for local access
+kubectl port-forward svc/grafana -n monitoring 3000:80 &
+echo "Grafana: http://localhost:3000"
 ```
 
-Default credentials:
-```
-Username: admin
-Password: admin
+Get the Grafana admin password:
+```bash
+kubectl get secret grafana -n monitoring \
+  -o jsonpath="{.data.admin-password}" | base64 --decode
 ```
 
-> **Note:** To get the Grafana admin password from the Kasten secret:
-> ```bash
-> kubectl get secret k10-grafana -n kasten-io \
->   -o jsonpath="{.data.admin-password}" | base64 --decode
-> ```
+Open [http://localhost:3000](http://localhost:3000) and log in with username `admin` and the password above.
+
+### Connect Grafana to Kasten Prometheus
+
+Kasten's embedded Prometheus is still accessible via the Kasten gateway service within the cluster:
+
+1. In Grafana: **Connections → Data Sources → Add data source**
+2. Select **Prometheus**
+3. Set **URL** to: `http://gateway.kasten-io.svc.cluster.local/k10/prometheus`
+4. Click **Save & Test** — you should see "Successfully queried the Prometheus API"
+
+> **Tip:** The gateway service listens on port 80 inside the cluster (the NodePort 8000 is only for external access). You can verify reachability from inside the cluster: `kubectl run --rm -it probe --image=curlimages/curl --restart=Never -n kasten-io -- curl -s -o /dev/null -w '%{http_code}' http://gateway.kasten-io.svc.cluster.local/k10/prometheus/-/healthy`
 
 ### 3a. Configure SMTP for Email Alerts
 
@@ -334,7 +355,7 @@ curl -s "http://localhost:8080/k10/prometheus/api/v1/query" \
 | 1 | Prometheus targets: Status → Targets | `catalog-svc` and other Kasten services listed |
 | 2 | PromQL query: `catalog_actions_count{status="complete",type="backup"}` | Non-zero result after at least one successful backup |
 | 3 | After failure simulation: `catalog_actions_count{status="failed"}` | Count increased |
-| 4 | Grafana accessible at `/k10/grafana` | Login succeeds |
+| 4 | Grafana accessible at `http://localhost:3000` (external install) | Login succeeds |
 | 5 | Mailhog test email | Email received in Mailhog at [http://localhost:8025](http://localhost:8025) |
 | 6 | Custom dashboard | At least 3 panels showing backup and catalog metrics |
 | 7 | Alert rule created | Rule appears in **Alerting → Alert Rules** |
@@ -343,12 +364,22 @@ curl -s "http://localhost:8080/k10/prometheus/api/v1/query" \
 
 ---
 
+## This workshop has challenges
+
+- **Grafana is no longer embedded in Kasten (removed in 7.5.0).** You must install it separately (see Part 3). Any older instruction referencing `http://localhost:8080/k10/grafana` will return 404 on Kasten 7.5.0+. All Grafana steps in this workshop use the external Grafana at `http://localhost:3000`.
+- **Connecting external Grafana to Kasten Prometheus** requires using the cluster-internal Kasten gateway URL (`http://gateway.kasten-io.svc.cluster.local/k10/prometheus`) as the data source URL. The gateway service listens on port 80 inside the cluster (port 8000 is only for NodePort external access). Using `localhost:8080/k10/prometheus` will fail because Grafana runs inside the cluster and cannot resolve `localhost` to your port-forward.
+- **Grafana alert evaluation requires a Grafana-managed alert rule group.** If you mix "Grafana-managed" and "Mimir/Loki-managed" rule types, the alerts may not fire as expected. Always create alert rules under **Alerting → Alert Rules → + New Alert Rule** (not via the panel "Create alert" button, which sometimes creates panel-linked rules that are harder to configure).
+- **The `catalog_actions_count` gauge** does not behave like a Prometheus counter — it fluctuates as RestorePoints are created and retired. Using `increase()` on it will not work reliably. For failure detection, filter on `{status="failed"}` and check if the value is non-zero, as shown in Part 5.
+- **Mailhog is no longer maintained** (archived on GitHub). It works for local testing, but consider [Mailpit](https://mailpit.axllent.org/) as a modern replacement. Both accept SMTP on port 1025 so the Grafana contact point configuration is the same.
+
+---
+
 ## Tips & References
 
 - [Kasten monitoring documentation](https://docs.kasten.io/latest/operating/monitoring.html)
 - [Prometheus PromQL documentation](https://prometheus.io/docs/prometheus/latest/querying/basics/)
 - [Grafana alerting documentation](https://grafana.com/docs/grafana/latest/alerting/)
-- [Mailhog](https://github.com/mailhog/MailHog) — a simple local SMTP server for development/testing
+- [Mailhog](https://github.com/mailhog/MailHog) — a simple local SMTP server for development/testing (archived; [Mailpit](https://mailpit.axllent.org/) is a maintained alternative with the same SMTP interface)
 - Key Kasten metric families:
   - `catalog_actions_count` — tracks backup, export, import, restore action counts
   - `catalog_persistent_volume_free_space_percent` — catalog database PVC health

@@ -35,13 +35,12 @@ Before installing Kasten, validate that the cluster storage meets requirements.
 helm repo add kasten https://charts.kasten.io/
 helm repo update
 
-# Run pre-flight check as a Job
-kubectl apply -f https://docs.kasten.io/tools/k10_primer.yaml
+# Determine the Kasten version to install
+K10_VERSION=$(helm search repo kasten/k10 --output json | jq -r '.[0].app_version')
+echo "Kasten version: $K10_VERSION"
 
-# Watch until the job completes (Ctrl-C when done)
-kubectl wait --for=condition=complete job/k10primer --timeout=120s
-kubectl logs job/k10primer
-kubectl delete -f https://docs.kasten.io/tools/k10primer.yaml
+# Run the pre-flight check script (URL is version-specific in Kasten 7.x+)
+curl -s "https://docs.kasten.io/downloads/${K10_VERSION}/tools/k10_primer.sh" | bash
 ```
 
 Look for confirmation that VolumeSnapshot support is detected. All checks must pass before proceeding.
@@ -96,10 +95,16 @@ kubectl port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
 
 Open the Kasten dashboard at [http://localhost:8080/k10/](http://localhost:8080/k10/).
 
-Accept the EULA on first access. The default token-based login can be obtained with:
+Accept the EULA on first access. Create a dedicated service account and generate a token for dashboard login:
 
 ```bash
-kubectl -n kasten-io create token k10-k10 --duration=24h
+# Kasten 8.x no longer ships a shared k10-k10 service account.
+# Create a dedicated SA for dashboard access.
+kubectl create serviceaccount k10-dashboard -n kasten-io
+kubectl create clusterrolebinding k10-dashboard \
+  --clusterrole=k10-admin \
+  --serviceaccount=kasten-io:k10-dashboard
+kubectl create token k10-dashboard -n kasten-io --duration=24h
 ```
 
 ---
@@ -240,8 +245,7 @@ kubectl exec -it statefulset/mongo-mongodb -n mongodb \
   -u root -p "$MONGODB_ROOT_PASSWORD" \
   --host "mongo-mongodb-0.mongo-mongodb-headless:27017,mongo-mongodb-1.mongo-mongodb-headless:27017" \
   --eval 'db.createCollection("log", { capped: true, size: 5242880, max: 5000 });
-          db.log.insert({ item: "card", qty: 15 });
-          db.log.insert({ item: "dice", qty: 3 });
+          db.log.insertMany([{ item: "card", qty: 15 }, { item: "dice", qty: 3 }]);
           db.log.find()'
 ```
 
