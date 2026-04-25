@@ -67,8 +67,12 @@ A logical backup uses application-native tools (`mongodump`, `pg_dump`, etc.) to
 
 ### 2a. Create the MongoDB logical dump Blueprint
 
+The Blueprint uses `kando output` to record the backup path, then exposes it via `outputArtifacts` using `{{ .Phases.<name>.Output.<key> }}`. This is required because `outputArtifacts` are resolved from phase outputs — you cannot reference them via `ArtifactsIn` within the same backup phase.
+
+Also add a `backupParameters.profile` to the policy (see step 2c) so Kasten knows which location profile to pass to `kando location push/pull`.
+
 ```bash
-cat <<EOF | kubectl apply -f -
+cat <<'EOF' | kubectl apply -f -
 apiVersion: cr.kanister.io/v1alpha1
 kind: Blueprint
 metadata:
@@ -79,7 +83,7 @@ actions:
     outputArtifacts:
       mongoBackup:
         keyValue:
-          path: '{{ .Profile.Location.Bucket }}/mongo-backups/{{ .StatefulSet.Namespace }}/{{ toDate "2006-01-02T15:04:05.999999999Z07:00" .Time | date "2006-01-02T15-04-05" }}/dump.tar.gz'
+          path: '{{ .Phases.takeDump.Output.backupPath }}'
     phases:
     - func: KubeTask
       name: takeDump
@@ -94,14 +98,16 @@ actions:
         - -c
         - |
           export MONGODB_ROOT_PASSWORD='{{ index .Phases.takeDump.Secrets.mongoSecret.Data "mongodb-root-password" | toString }}'
+          BACKUP_PATH="mongo-backups/{{ .StatefulSet.Namespace }}/{{ toDate "2006-01-02T15:04:05.999999999Z07:00" .Time | date "2006-01-02T15-04-05" }}/dump.tar.gz"
           mongodump \
             --authenticationDatabase admin \
             -u root \
-            -p "\$MONGODB_ROOT_PASSWORD" \
+            -p "$MONGODB_ROOT_PASSWORD" \
             --host "mongo-mongodb-0.mongo-mongodb-headless.{{ .StatefulSet.Namespace }}:27017" \
             --gzip \
             --archive=/tmp/dump.tar.gz
-          kando location push --profile '{{ toJson .Profile }}' --path '{{ .ArtifactsIn.mongoBackup.KeyValue.path }}' /tmp/dump.tar.gz
+          kando location push --profile '{{ toJson .Profile }}' --path "${BACKUP_PATH}" /tmp/dump.tar.gz
+          kando output backupPath "${BACKUP_PATH}"
       objects:
         mongoSecret:
           kind: Secret
@@ -128,7 +134,7 @@ actions:
           mongorestore \
             --authenticationDatabase admin \
             -u root \
-            -p "\$MONGODB_ROOT_PASSWORD" \
+            -p "$MONGODB_ROOT_PASSWORD" \
             --host "mongo-mongodb-0.mongo-mongodb-headless.{{ .StatefulSet.Namespace }}:27017" \
             --gzip \
             --archive=/tmp/dump.tar.gz \
@@ -155,11 +161,75 @@ kubectl get statefulset mongo-mongodb -n mongodb \
   -o jsonpath='{.metadata.annotations.kanister\.kasten\.io/blueprint}'
 ```
 
-### 2c. Run a backup and observe the difference
+### 2c. Update the policy to specify the location profile for Kanister
 
-1. In the Kasten dashboard, navigate to **Policies → Policies → mongodb-backup → Run Once**.
-2. Under **Actions**, open the running policy run and observe the **Logical** phase in addition to the usual snapshot.
-3. In MinIO, confirm a `mongodump` artifact appears in the bucket alongside the snapshot manifest.
+Kanister Blueprints that use `kando location push/pull` need a location profile. Add `backupParameters.profile` to the policy:
+
+```bash
+cat <<EOF | kubectl apply -f -
+kind: Policy
+apiVersion: config.kio.kasten.io/v1alpha1
+metadata:
+  name: mongodb-backup
+  namespace: kasten-io
+spec:
+  frequency: "@hourly"
+  retention:
+    hourly: 24
+    daily: 7
+    weekly: 4
+    monthly: 12
+    yearly: 7
+  selector:
+    matchExpressions:
+    - key: k10.kasten.io/appNamespace
+      operator: In
+      values: [mongodb]
+  actions:
+  - action: backup
+    backupParameters:
+      profile:
+        name: s3-local
+        namespace: kasten-io
+  - action: export
+    exportParameters:
+      frequency: "@hourly"
+      profile:
+        name: s3-local
+        namespace: kasten-io
+      exportData:
+        enabled: true
+    retention: {}
+EOF
+```
+
+### 2d. Run a backup and observe the difference
+
+```bash
+cat <<EOF | kubectl apply -f -
+kind: RunAction
+apiVersion: actions.kio.kasten.io/v1alpha1
+metadata:
+  name: mongodb-logical-run-1
+  namespace: kasten-io
+  labels:
+    k10.kasten.io/policyName: mongodb-backup
+    k10.kasten.io/policyNamespace: kasten-io
+spec:
+  subject:
+    apiVersion: config.kio.kasten.io/v1alpha1
+    kind: Policy
+    name: mongodb-backup
+    namespace: kasten-io
+EOF
+
+kubectl get runaction mongodb-logical-run-1 -n kasten-io -w
+```
+
+After the backup completes, verify the `mongodump` artifact appeared in MinIO:
+```bash
+mc ls local/lab-bucket-immutable/ --recursive | grep dump
+```
 
 ---
 
@@ -173,7 +243,7 @@ An application consistent snapshot combines the speed of a CSI snapshot with the
 ### 3a. Create the hooks Blueprint
 
 ```bash
-cat <<EOF | kubectl apply -f -
+cat <<'EOF' | kubectl apply -f -
 apiVersion: cr.kanister.io/v1alpha1
 kind: Blueprint
 metadata:
@@ -202,7 +272,7 @@ actions:
         - -c
         - |
           export MONGODB_ROOT_PASSWORD='{{ index .Phases.lockMongo.Secrets.mongoDbSecret.Data "mongodb-root-password" | toString }}'
-          mongosh --authenticationDatabase admin -u root -p "\$MONGODB_ROOT_PASSWORD" \
+          mongosh --authenticationDatabase admin -u root -p "$MONGODB_ROOT_PASSWORD" \
             --eval="db.fsyncLock()"
   backupPosthook:
     phases:
@@ -226,7 +296,7 @@ actions:
         - -c
         - |
           export MONGODB_ROOT_PASSWORD='{{ index .Phases.unlockMongo.Secrets.mongoDbSecret.Data "mongodb-root-password" | toString }}'
-          mongosh --authenticationDatabase admin -u root -p "\$MONGODB_ROOT_PASSWORD" \
+          mongosh --authenticationDatabase admin -u root -p "$MONGODB_ROOT_PASSWORD" \
             --eval="db.fsyncUnlock()"
 EOF
 ```
@@ -265,7 +335,14 @@ Run the policy from the dashboard and observe both hooks executing around the sn
 
 Instead of manually annotating each workload, `BlueprintBindings` let you define a label selector so Kasten automatically applies a Blueprint to matching workloads.
 
+> **Important:** The `BlueprintBinding` API changed in Kasten 8.x. The selector uses a structured format with separate `type` and `labels` entries under `matchAll`, not a combined `type.group/resource + selector.matchLabels` block. Also, when using a MongoDB replica set (which includes an arbiter StatefulSet), make sure to use `app.kubernetes.io/component: mongodb` rather than `app.kubernetes.io/name: mongodb` to avoid applying hooks to the arbiter (which has no MongoDB secret).
+
 ```bash
+# First remove the manual annotation (use - suffix to delete it, not set it to empty string)
+kubectl annotate statefulset mongo-mongodb \
+  kanister.kasten.io/blueprint- \
+  -n mongodb
+
 cat <<EOF | kubectl apply -f -
 apiVersion: config.kio.kasten.io/v1alpha1
 kind: BlueprintBinding
@@ -279,11 +356,16 @@ spec:
   resources:
     matchAll:
     - type:
-        group: apps
-        resource: statefulsets
-      selector:
-        matchLabels:
-          app.kubernetes.io/name: mongodb
+        operator: In
+        values:
+        - group: apps
+          resource: statefulsets
+          version: v1
+    - labels:
+        key: app.kubernetes.io/component
+        operator: In
+        values:
+        - mongodb
 EOF
 ```
 
@@ -292,7 +374,7 @@ Verify the binding was applied:
 kubectl get blueprintbinding -n kasten-io
 ```
 
-Now any StatefulSet with `app.kubernetes.io/name=mongodb` in any namespace will automatically use the `mongo-hooks` Blueprint — no manual annotation needed.
+Now any StatefulSet with `app.kubernetes.io/component=mongodb` in any namespace will automatically use the `mongo-hooks` Blueprint — no manual annotation needed.
 
 ---
 
@@ -300,19 +382,19 @@ Now any StatefulSet with `app.kubernetes.io/name=mongodb` in any namespace will 
 
 Generic Volume Backup (GVB) is used when the underlying storage driver does not support CSI snapshots. Instead, Kasten injects a sidecar container into the workload pod at backup time and uses it to copy data byte-for-byte.
 
-To enable GVB, annotate the StatefulSet:
+To enable GVB, remove any Blueprint annotation (using `-` suffix) and add the GVB label and annotation:
 
 ```bash
+# Remove Blueprint annotation entirely (don't set to empty string — that causes errors)
 kubectl annotate statefulset mongo-mongodb \
-  kanister.kasten.io/blueprint='' \
-  --overwrite \
+  kanister.kasten.io/blueprint- \
   -n mongodb
 
 kubectl label statefulset mongo-mongodb \
   kanister.kasten.io/genericBackup='true' \
   -n mongodb
 
-# You also need to specify which storageclass to use for the staging volume
+# Specify which StorageClass to use for the staging volume
 kubectl annotate statefulset mongo-mongodb \
   kanister.kasten.io/genericVolumeBackupStorageClass='csi-hostpath-sc' \
   -n mongodb
@@ -338,6 +420,16 @@ kubectl get pods -n mongodb -w
 | 4 | Annotation applied: `kubectl get statefulset mongo-mongodb -n mongodb -o jsonpath='{.metadata.annotations}'` | Blueprint annotation visible |
 | 5 | BlueprintBinding: `kubectl get blueprintbinding -n kasten-io` | `mongodb-hooks-binding` present |
 | 6 | After consistent backup: check policy run in dashboard | Both Backup and Kanister hook phases show "Complete" |
+
+---
+
+## This workshop has challenges
+
+- **Kanister `outputArtifacts` are not available as `ArtifactsIn` within the same phase.** During the backup phase, you cannot reference `{{ .ArtifactsIn.myArtifact.KeyValue.path }}` because the artifact has not been created yet. Use `kando output <key> <value>` to emit phase outputs, then reference them in `outputArtifacts` via `{{ .Phases.<name>.Output.<key> }}`. The `ArtifactsIn` reference only works in the restore phase, where backup artifacts are passed as inputs.
+- **The policy must specify `backupParameters.profile` for Kanister operations.** When a Blueprint uses `kando location push/pull`, Kasten needs to know which location profile to use. Without `backupParameters.profile` in the Policy spec, Kasten looks for a profile named `kanister-profile` and fails if it doesn't exist.
+- **The `BlueprintBinding` spec format changed in Kasten 8.x.** The `matchAll` list items now use separate entries for `type` and `labels` selectors (not a combined object). Use `kubectl explain blueprintbinding.spec.resources.matchAll` to see the current schema.
+- **Setting `kanister.kasten.io/blueprint=''` (empty string) causes errors.** When removing a Blueprint annotation, use `kubectl annotate ... kanister.kasten.io/blueprint-` (with a `-` suffix) to delete it. Setting it to an empty string leaves the annotation present, and Kasten tries to look up a Blueprint with an empty name, which fails with "resource name may not be empty".
+- **BlueprintBindings match all StatefulSets with the selector label, including arbiters.** The Bitnami MongoDB replica set chart creates a `mongo-mongodb-arbiter` StatefulSet with `app.kubernetes.io/name: mongodb`. The arbiter doesn't have a `mongo-mongodb` secret, so Blueprint hooks using `{{ .StatefulSet.Name }}` to look up the secret will fail on the arbiter. Use `app.kubernetes.io/component: mongodb` in the selector instead.
 
 ---
 

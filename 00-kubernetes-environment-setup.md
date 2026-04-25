@@ -53,47 +53,9 @@ You should see one node in `Ready` state.
 
 ---
 
-## Step 2 — Install the CSI Hostpath Driver
+## Step 2 — Install the VolumeSnapshot CRDs and Controller
 
-The [CSI Hostpath Driver](https://github.com/kubernetes-csi/csi-driver-host-path) is a reference implementation that supports `VolumeSnapshot`. It is used extensively in Kubernetes CSI testing and is ideal for local training.
-
-```bash
-# Clone the CSI driver repository
-git clone https://github.com/kubernetes-csi/csi-driver-host-path.git
-cd csi-driver-host-path
-
-# Deploy the driver — kubernetes-latest is a symlink to the most recent supported k8s version (currently kubernetes-1.31)
-./deploy/kubernetes-latest/deploy.sh
-
-cd ..
-```
-
-Wait for all pods to become ready:
-
-```bash
-kubectl wait pods -n default -l app=csi-hostpathplugin --for=condition=Ready --timeout=120s
-```
-
-Verify the StorageClass was created:
-
-```bash
-kubectl get storageclass
-```
-
-You should see `csi-hostpath-sc` listed. Make it the default:
-
-```bash
-kubectl patch storageclass csi-hostpath-sc \
-  -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
-
-# Remove default from any pre-existing standard/local-path class if present
-kubectl patch storageclass standard \
-  -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' 2>/dev/null || true
-```
-
----
-
-## Step 3 — Install the VolumeSnapshot CRDs and Controller
+> **Important:** The VolumeSnapshot CRDs must be installed **before** the CSI driver. The driver's deploy script creates a `VolumeSnapshotClass` object at the end, and that step will fail with a CRD-not-found error if the CRDs are not already present.
 
 Kind does not include the VolumeSnapshot API by default. Install it from the upstream snapshot controller repository.
 
@@ -111,8 +73,57 @@ kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snaps
 Wait for the snapshot controller to start:
 
 ```bash
-kubectl wait pods -n kube-system -l app=snapshot-controller --for=condition=Ready --timeout=120s
+kubectl wait pods -n kube-system -l app.kubernetes.io/name=snapshot-controller --for=condition=Ready --timeout=120s
 ```
+
+---
+
+## Step 3 — Install the CSI Hostpath Driver
+
+The [CSI Hostpath Driver](https://github.com/kubernetes-csi/csi-driver-host-path) is a reference implementation that supports `VolumeSnapshot`. It is used extensively in Kubernetes CSI testing and is ideal for local training.
+
+```bash
+# Clone the CSI driver repository
+git clone https://github.com/kubernetes-csi/csi-driver-host-path.git
+cd csi-driver-host-path
+
+# Deploy the driver — kubernetes-latest is a symlink to the most recent supported k8s version (currently kubernetes-1.31)
+./deploy/kubernetes-latest/deploy.sh
+
+cd ..
+```
+
+Wait for all pods to become ready:
+
+```bash
+kubectl wait pods -n default -l app.kubernetes.io/name=csi-hostpathplugin --for=condition=Ready --timeout=120s
+```
+
+The CSI v1.31 driver no longer ships a `StorageClass` in its manifests. Create one and set it as default:
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-hostpath-sc
+provisioner: hostpath.csi.k8s.io
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+EOF
+
+kubectl patch storageclass csi-hostpath-sc \
+  -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+# Remove default from any pre-existing standard/local-path class if present
+kubectl patch storageclass standard \
+  -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' 2>/dev/null || true
+
+kubectl get storageclass
+```
+
+You should see `csi-hostpath-sc (default)` listed.
 
 ---
 
@@ -145,7 +156,7 @@ Expected: control plane URL shown, no errors.
 
 **2. CSI driver pods are running:**
 ```bash
-kubectl get pods -l app=csi-hostpathplugin
+kubectl get pods -l app.kubernetes.io/name=csi-hostpathplugin
 ```
 Expected: pod in `Running` state with all containers ready.
 
@@ -163,9 +174,9 @@ Expected: `volumesnapshots`, `volumesnapshotcontents`, and `volumesnapshotclasse
 
 **5. Snapshot controller is running:**
 ```bash
-kubectl get pods -n kube-system -l app=snapshot-controller
+kubectl get pods -n kube-system -l app.kubernetes.io/name=snapshot-controller
 ```
-Expected: pod in `Running` state.
+Expected: pod(s) in `Running` state.
 
 **6. VolumeSnapshotClass is annotated:**
 ```bash

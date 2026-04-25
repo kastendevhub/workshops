@@ -231,11 +231,12 @@ EOF
 
 Run the import policy once:
 ```bash
-kubectl --context=kind-kasten-west apply -f - <<EOF
+cat <<EOF | kubectl --context=kind-kasten-west apply -f -
 kind: RunAction
 apiVersion: actions.kio.kasten.io/v1alpha1
 metadata:
   name: import-run-1
+  namespace: kasten-io
   labels:
     k10.kasten.io/policyName: mongodb-import
     k10.kasten.io/policyNamespace: kasten-io
@@ -248,7 +249,7 @@ spec:
 EOF
 ```
 
-After the import completes, the `mongodb` namespace should appear in West's Kasten dashboard with available RestorePoints.
+After the import completes, `RestorePointContent` objects appear on West (cluster-scoped). In the dashboard, `mongodb` will appear as a "removed" application with available RestorePoints.
 
 ---
 
@@ -283,11 +284,58 @@ EOF
 
 ### 7b. Restore with the TransformSet applied
 
-In the West Kasten dashboard:
+**Option A — Dashboard restore:**
 1. **Applications → mongodb → Restore Points** — select the imported point
 2. Click **Restore**
 3. Under **Transform Set**, select `mongodb-migration-transforms`
 4. Confirm restore
+
+**Option B — kubectl-native restore:**
+```bash
+# Create the target namespace
+kubectl --context=kind-kasten-west create namespace mongodb
+
+# Bind the imported RestorePointContent to a namespaced RestorePoint
+MONGODB_RPC=$(kubectl --context=kind-kasten-west get restorepointcontent \
+  -l k10.kasten.io/appNamespace=mongodb,k10.kasten.io/exportType=portableAppData \
+  -o jsonpath='{.items[0].metadata.name}')
+
+cat <<EOF | kubectl --context=kind-kasten-west apply -f -
+kind: RestorePoint
+apiVersion: apps.kio.kasten.io/v1alpha1
+metadata:
+  name: mongodb-from-import
+  namespace: mongodb
+spec:
+  restorePointContentRef:
+    name: ${MONGODB_RPC}
+EOF
+
+# Restore with the TransformSet
+cat <<EOF | kubectl --context=kind-kasten-west apply --validate=false -f -
+kind: RestoreAction
+apiVersion: actions.kio.kasten.io/v1alpha1
+metadata:
+  name: mongodb-restore-west-1
+  namespace: mongodb
+spec:
+  targetNamespace: mongodb
+  overwriteExisting: true
+  transforms:
+  - transformSetRef:
+      name: mongodb-migration-transforms
+      namespace: kasten-io
+  subject:
+    apiVersion: apps.kio.kasten.io/v1alpha1
+    kind: RestorePoint
+    name: mongodb-from-import
+    namespace: mongodb
+EOF
+
+kubectl --context=kind-kasten-west get restoreaction mongodb-restore-west-1 -n mongodb
+```
+
+> **Note:** `kubectl apply` requires `--validate=false` when using `transformSetRef` inside `transforms[]` because the local schema marks `json` as required even though it is optional when `transformSetRef` is used.
 
 Verify MongoDB on West:
 ```bash
@@ -304,6 +352,13 @@ kubectl --context=kind-kasten-west exec -it statefulset/mongo-mongodb \
 ```
 
 Both records from East should appear on West.
+
+Verify the transform was applied — the StatefulSet should have 1 replica instead of East's 2:
+```bash
+kubectl --context=kind-kasten-west get statefulset mongo-mongodb -n mongodb \
+  -o jsonpath='{.spec.replicas}'
+# Expected: 1
+```
 
 ---
 
@@ -324,6 +379,9 @@ Both records from East should appear on West.
 
 - **The `k10multicluster` CLI is deprecated (since Kasten 7.0.0).** All multi-cluster registration is now done via the Kasten dashboard UI. The Steps 2–3 above reflect this. If you find older instructions referencing `k10multicluster setup-primary` or `k10multicluster bootstrap`, they no longer apply.
 - **Kind clusters can only communicate via their Docker bridge network IP, not `localhost`.** The West Kasten URL that East can reach is `http://<WEST_DOCKER_IP>:32000/k10/`. Get the IP with `docker inspect kasten-west-control-plane --format '{{ .NetworkSettings.Networks.kind.IPAddress }}'`. Using `localhost` will cause the connection to fail silently.
+- **The `global-s3` profile on West must use East's Docker bridge IP for MinIO, not the Kubernetes service DNS name.** `minio.minio.svc.cluster.local:9000` only resolves inside the East cluster. From West, use `http://<EAST_DOCKER_IP>:32010` (MinIO's NodePort on East). Get the IP with `docker inspect kasten-training-control-plane --format '{{ .NetworkSettings.Networks.kind.IPAddress }}'`. Without this fix, the profile validation fails with "Could not find profile bucket" and the Import Policy reports "Profile is invalid".
+- **The `RunAction` namespace field is required in Kasten 8.x.** The `RunAction` metadata must include `namespace: kasten-io`. Without it, the resource is created in the wrong namespace and the policy reference does not resolve.
+- **`kubectl apply` rejects `transformSetRef` inside `transforms[]` without `--validate=false`.** The client-side schema marks `json` as required within `TransformOrRef`, even though it is optional when a `transformSetRef` is provided. Use `--validate=false` to bypass this client-side validation error.
 - **Running two Kind clusters simultaneously is resource-intensive.** You need at least 12 GB of RAM allocated to Docker Desktop. If pods are stuck in `Pending`, open Docker Desktop → Settings → Resources → Memory and increase the limit.
 - **Port-forwarding two dashboards at once** (East on 8080, West on 8081) can silently stop working if either `kubectl port-forward` process dies. If you get connection refused on a dashboard, re-run the respective port-forward command.
 - **The receive string for Import Policies** is found in East's dashboard: Applications → `mongodb` → the policy's **Copy Receive String** action. It encodes the bucket path and must be pasted verbatim — any truncation will cause the import to fail with a cryptic error.

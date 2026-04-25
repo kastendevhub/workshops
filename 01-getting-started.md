@@ -35,15 +35,20 @@ Before installing Kasten, validate that the cluster storage meets requirements.
 helm repo add kasten https://charts.kasten.io/
 helm repo update
 
-# Determine the Kasten version to install
+# Run the pre-flight check using k10tools primer
+# Download k10tools from https://github.com/kastenhq/external-tools/releases/latest
+# macOS (Apple Silicon): k10tools_*_macOS_arm64.tar.gz
+# macOS (Intel):         k10tools_*_macOS_amd64.tar.gz
+# Linux (amd64):         k10tools_*_linux_amd64.tar.gz
 K10_VERSION=$(helm search repo kasten/k10 --output json | jq -r '.[0].app_version')
-echo "Kasten version: $K10_VERSION"
+curl -sL "https://github.com/kastenhq/external-tools/releases/download/${K10_VERSION}/k10tools_${K10_VERSION}_macOS_arm64.tar.gz" \
+  | tar -xz -C /usr/local/bin/ k10tools
+chmod +x /usr/local/bin/k10tools
 
-# Run the pre-flight check script (URL is version-specific in Kasten 7.x+)
-curl -s "https://docs.kasten.io/downloads/${K10_VERSION}/tools/k10_primer.sh" | bash
+k10tools primer
 ```
 
-Look for confirmation that VolumeSnapshot support is detected. All checks must pass before proceeding.
+Look for all checks to complete with `OK` status. The CSI provisioner and VolumeSnapshotClass checks are the critical ones for Kasten.
 
 ---
 
@@ -228,7 +233,6 @@ helm install mongo bitnami/mongodb \
   --namespace mongodb \
   --set architecture=replicaset \
   --set persistence.size=1Gi \
-  --version 13.6.7 \
   --wait
 ```
 
@@ -315,6 +319,7 @@ kind: RunAction
 apiVersion: actions.kio.kasten.io/v1alpha1
 metadata:
   name: mongodb-backup-run-1
+  namespace: kasten-io
   labels:
     k10.kasten.io/policyName: mongodb-backup
     k10.kasten.io/policyNamespace: kasten-io
@@ -327,7 +332,7 @@ spec:
 EOF
 
 # Watch until complete
-kubectl get runaction mongodb-backup-run-1 -w
+kubectl get runaction mongodb-backup-run-1 -n kasten-io -w
 ```
 
 ---
@@ -341,14 +346,63 @@ helm uninstall mongo -n mongodb
 kubectl delete namespace mongodb
 ```
 
-Restore from Kasten:
+Wait for the namespace to fully terminate before proceeding.
+
+### Option A — Dashboard restore
 
 1. In the dashboard, navigate to **Applications**.
 2. Click the **mongodb** application card (it will appear as `removed`).
 3. Under **Restore Points**, select the most recent exported `RestorePoint`.
 4. Click **Restore** and confirm.
 
-Wait for the restore action to complete, then verify data:
+### Option B — kubectl-native restore
+
+When the namespace is deleted, namespaced `RestorePoint` objects are removed, but cluster-scoped `RestorePointContent` objects persist. Restore using these steps:
+
+```bash
+# Find the exported RestorePointContent
+EXPORTED_RPC=$(kubectl get restorepointcontent \
+  -l k10.kasten.io/exportType=portableAppData \
+  -o jsonpath='{.items[0].metadata.name}')
+echo "Using: $EXPORTED_RPC"
+
+# Recreate the namespace
+kubectl create namespace mongodb
+
+# Create a RestorePoint from the RestorePointContent
+cat <<EOF | kubectl apply -f -
+kind: RestorePoint
+apiVersion: apps.kio.kasten.io/v1alpha1
+metadata:
+  name: mongodb-from-export
+  namespace: mongodb
+spec:
+  restorePointContentRef:
+    name: ${EXPORTED_RPC}
+EOF
+
+# Trigger the restore
+cat <<EOF | kubectl apply -f -
+kind: RestoreAction
+apiVersion: actions.kio.kasten.io/v1alpha1
+metadata:
+  name: mongodb-restore-1
+  namespace: mongodb
+spec:
+  targetNamespace: mongodb
+  overwriteExisting: true
+  subject:
+    apiVersion: apps.kio.kasten.io/v1alpha1
+    kind: RestorePoint
+    name: mongodb-from-export
+    namespace: mongodb
+EOF
+
+# Watch until complete
+kubectl get restoreaction mongodb-restore-1 -n mongodb -w
+```
+
+Wait for the restore action to complete (`state: Complete`), then verify data:
 
 ```bash
 export MONGODB_ROOT_PASSWORD=$(kubectl get secret mongo-mongodb \
