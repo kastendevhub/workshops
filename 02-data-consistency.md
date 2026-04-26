@@ -360,8 +360,9 @@ Instead of manually annotating each workload, `BlueprintBindings` let you define
 
 > **Important:** The `BlueprintBinding` API changed in Kasten 8.x. The selector uses a structured format with separate `type` and `labels` entries under `matchAll`, not a combined `type.group/resource + selector.matchLabels` block. Also, when using a MongoDB replica set (which includes an arbiter StatefulSet), make sure to use `app.kubernetes.io/component: mongodb` rather than `app.kubernetes.io/name: mongodb` to avoid applying hooks to the arbiter (which has no MongoDB secret).
 
+The `-` suffix on `kanister.kasten.io/blueprint-` is the kubectl syntax for deleting an annotation — do not set it to an empty string, which would cause Kasten to look up a Blueprint with an empty name and fail.
+
 ```bash
-# First remove the manual annotation (use - suffix to delete it, not set it to empty string)
 kubectl annotate statefulset mongo-mongodb \
   kanister.kasten.io/blueprint- \
   -n mongodb
@@ -408,7 +409,6 @@ Generic Volume Backup (GVB) is used when the underlying storage driver does not 
 To enable GVB, remove any Blueprint annotation (using `-` suffix) and add the GVB label and annotation:
 
 ```bash
-# Remove Blueprint annotation entirely (don't set to empty string — that causes errors)
 kubectl annotate statefulset mongo-mongodb \
   kanister.kasten.io/blueprint- \
   -n mongodb
