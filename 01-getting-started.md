@@ -141,7 +141,7 @@ mc retention set --default COMPLIANCE 1d local/lab-bucket-immutable
 
 In the Kasten dashboard:
 
-1. Navigate to **Settings > Location**.
+1. Navigate to **Profiles > Location**.
 2. Click **+ New Profile**.
 3. Fill in the following:
 
