@@ -132,7 +132,7 @@ kubectl port-forward svc/minio -n minio 9000:9000 &
 
 mc alias set local http://localhost:9000 minioadmin minioadmin
 mc mb --with-lock local/lab-bucket-immutable
-mc retention set --default GOVERNANCE 1d local/lab-bucket-immutable
+mc retention set --default COMPLIANCE 1d local/lab-bucket-immutable
 ```
 
 ---
