@@ -45,19 +45,40 @@ A crash consistent backup captures a point-in-time snapshot of the volume withou
 
 ### Exercise
 
-1. In the Kasten dashboard navigate to **Applications → mongodb**.
-2. Click **Snapshot** (manual snapshot, no policy needed).
-3. In a separate terminal, watch VolumeSnapshot objects appear:
+1. In the Kasten dashboard navigate to **Policies** and run the `mongodb-backup` policy on demand.
+2. In a separate terminal, watch VolumeSnapshot objects appear during the snapshot phase:
    ```bash
    kubectl get volumesnapshot -n mongodb -w
    ```
-4. After the backup completes, inspect the created snapshot:
+3. After the snapshot phase completes, inspect the created snapshot:
    ```bash
    kubectl get volumesnapshot -n mongodb
    kubectl describe volumesnapshot -n mongodb <snapshot-name>
    ```
 
 Observe that the snapshot references the underlying CSI driver snapshot handle — Kasten stores only the *reference* in its catalog, not the snapshot data itself.
+
+#### Observe the export phase
+
+The policy includes an export phase that runs immediately after the snapshot. While it runs, watch what Kasten does in the `kasten-io` namespace:
+
+```bash
+# Temporary PVCs cloned from the volume snapshot
+kubectl get pvc -n kasten-io -w
+```
+
+In a second terminal watch the datamover pods:
+
+```bash
+kubectl get pods -n kasten-io -w | grep -i export
+```
+
+You will see:
+1. A PVC cloned from each VolumeSnapshot — same consistency point as the original snapshot.
+2. A datamover pod attached to each cloned PVC, reading its data and pushing it to MinIO.
+3. Once the export completes, both the cloned PVCs and the datamover pods are automatically deleted.
+
+This shows that the exported data in object storage is also crash-consistent: Kasten reads from the frozen clone, not from the live MongoDB volume, so the database is never paused during the transfer.
 
 **Takeaway:** Crash-consistent backups are fast and fully valid for MongoDB when the storage provides true atomic snapshots, journaling is enabled, and journal and data share the same volume. In this lab the hostpath CSI driver does not satisfy those guarantees, which is why the later exercises add application-consistent coordination.
 
