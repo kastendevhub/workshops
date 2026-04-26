@@ -39,7 +39,9 @@ kubectl get profile s3-local -n kasten-io
 
 A crash consistent backup captures a point-in-time snapshot of the volume without any application coordination. Like pulling the power plug — you get exactly what was on disk.
 
-> **Warning:** MongoDB's documentation explicitly states that a plain volume snapshot without first locking the database is **not** a dependable backup for MongoDB. This exercise demonstrates the mechanics, not a production best practice.
+> **Note:** MongoDB's documentation actually supports crash-consistent snapshots as a valid backup strategy — provided three conditions are met: the storage layer produces a true atomic snapshot, journaling is enabled, and the journal and data files live on the same volume. When all three hold, MongoDB can recover cleanly from a crash-consistent snapshot without any database locking.
+>
+> In this lab those conditions are **not guaranteed**: the CSI hostpath driver is a development driver that does not promise true atomic snapshots, and we have not verified that the Bitnami replica set places journal and data on the same volume. That is why later exercises add application-consistent hooks — not because locking is always required, but because it compensates for storage that cannot guarantee atomicity on its own.
 
 ### Exercise
 
@@ -57,7 +59,7 @@ A crash consistent backup captures a point-in-time snapshot of the volume withou
 
 Observe that the snapshot references the underlying CSI driver snapshot handle — Kasten stores only the *reference* in its catalog, not the snapshot data itself.
 
-**Takeaway:** Crash consistent backups are fast but may leave databases in an inconsistent state. They are not recommended for transactional data services.
+**Takeaway:** Crash-consistent backups are fast and fully valid for MongoDB when the storage provides true atomic snapshots, journaling is enabled, and journal and data share the same volume. In this lab the hostpath CSI driver does not satisfy those guarantees, which is why the later exercises add application-consistent coordination.
 
 ---
 
