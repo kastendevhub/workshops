@@ -177,7 +177,7 @@ spec:
     credential:
       secret:
         apiVersion: v1
-        kind: Secret
+        kind: secret
         name: k10secret-minio
         namespace: kasten-io
       secretType: AwsAccessKey
@@ -186,7 +186,7 @@ spec:
       name: lab-bucket-immutable
       objectStoreType: S3
       pathType: Directory
-      protectionPeriod: P20D
+      protectionPeriod: 480h0m0s
       region: us-east-1
     type: ObjectStore
   type: Location
