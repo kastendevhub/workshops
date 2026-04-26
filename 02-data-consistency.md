@@ -13,7 +13,6 @@ By the end of this workshop you will understand the four backup types Kasten sup
 | **Crash Consistent** | CSI volume snapshot only | Stateless apps, low-stakes data |
 | **Logical** | `mongodump`/`pgdump` via Kanister Blueprint | Any database when you own the backup path |
 | **Application Consistent** | CSI snapshot + pre/post hooks that quiesce the app | Databases that must lock during snapshot |
-| **Generic Volume Backup** | Kanister sidecar copies data byte-for-byte | Storage that doesn't support CSI snapshots |
 
 You will also learn:
 - How to automatically bind a Kanister Blueprint to an application using `BlueprintBindings`
@@ -402,37 +401,6 @@ Now any StatefulSet with `app.kubernetes.io/component=mongodb` in any namespace 
 
 ---
 
-## Part 5 — Generic Volume Backup
-
-Generic Volume Backup (GVB) is used when the underlying storage driver does not support CSI snapshots. Instead, Kasten injects a sidecar container into the workload pod at backup time and uses it to copy data byte-for-byte.
-
-To enable GVB, remove any Blueprint annotation (using `-` suffix) and add the GVB label and annotation:
-
-```bash
-kubectl annotate statefulset mongo-mongodb \
-  kanister.kasten.io/blueprint- \
-  -n mongodb
-
-kubectl label statefulset mongo-mongodb \
-  kanister.kasten.io/genericBackup='true' \
-  -n mongodb
-
-# Specify which StorageClass to use for the staging volume
-kubectl annotate statefulset mongo-mongodb \
-  kanister.kasten.io/genericVolumeBackupStorageClass='csi-hostpath-sc' \
-  -n mongodb
-```
-
-Trigger a backup from the dashboard and observe the Kanister sidecar pod created during the backup in the `mongodb` namespace:
-
-```bash
-kubectl get pods -n mongodb -w
-```
-
-> **Note:** GVB is slower than snapshot-based backups and should only be used when snapshots are not available. It does not require application hooks because it reads at the filesystem layer.
-
----
-
 ## Validation Checkpoints
 
 | # | Check | Expected Result |
@@ -442,7 +410,7 @@ kubectl get pods -n mongodb -w
 | 3 | Blueprint exists: `kubectl get blueprint mongo-hooks -n kasten-io` | Blueprint listed |
 | 4 | Annotation applied: `kubectl get statefulset mongo-mongodb -n mongodb -o jsonpath='{.metadata.annotations}'` | Blueprint annotation visible |
 | 5 | BlueprintBinding: `kubectl get blueprintbinding -n kasten-io` | `mongodb-hooks-binding` present |
-| 6 | After consistent backup: check policy run in dashboard | Both Backup and Kanister hook phases show "Complete" |
+| 5 | After consistent backup: check policy run in dashboard | Both Backup and Kanister hook phases show "Complete" |
 
 ---
 
