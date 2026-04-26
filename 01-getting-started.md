@@ -59,7 +59,6 @@ kubectl create namespace kasten-io
 
 helm install k10 kasten/k10 \
   --namespace kasten-io \
-  --set auth.tokenAuth.enabled=true \
   --wait
 ```
 
@@ -81,34 +80,7 @@ kubectl --namespace kasten-io port-forward service/gateway 8080:80
 
 Open the Kasten dashboard at [http://localhost:8080/k10/](http://localhost:8080/k10/).
 
-Accept the EULA on first access. Create a dedicated service account and generate a token for dashboard login:
-
-```bash
-kubectl create serviceaccount k10-dashboard -n kasten-io
-kubectl create clusterrolebinding k10-dashboard \
-  --clusterrole=k10-admin \
-  --serviceaccount=kasten-io:k10-dashboard
-
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-type: kubernetes.io/service-account-token
-metadata:
-  name: k10-dashboard-token
-  namespace: kasten-io
-  annotations:
-    kubernetes.io/service-account.name: k10-dashboard
-EOF
-```
-
-Retrieve the token at any time with:
-
-```bash
-kubectl get secret k10-dashboard-token -n kasten-io \
-  -o jsonpath='{.data.token}' | base64 -d
-```
-
-> **Tip — logging in:** Copy the token output above, paste it into the **Token** field on the dashboard login page, and click **Sign In**.
+Accept the EULA on first access. No login is required — Kasten runs without authentication by default on a local cluster.
 
 ---
 
