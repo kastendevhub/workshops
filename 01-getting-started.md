@@ -76,7 +76,7 @@ All pods should be `Running` or `Completed`.
 ## Step 3 — Expose the Kasten Dashboard
 
 ```bash
-kubectl port-forward svc/gateway -n kasten-io 8080:8000 &
+kubectl --namespace kasten-io port-forward service/gateway 8080:80
 ```
 
 Open the Kasten dashboard at [http://localhost:8080/k10/](http://localhost:8080/k10/).
