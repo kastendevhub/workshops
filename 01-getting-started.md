@@ -59,6 +59,7 @@ kubectl create namespace kasten-io
 
 helm install k10 kasten/k10 \
   --namespace kasten-io \
+  --set auth.tokenAuth.enabled=true \
   --wait
 ```
 
@@ -75,27 +76,7 @@ All pods should be `Running` or `Completed`.
 ## Step 3 — Expose the Kasten Dashboard
 
 ```bash
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: gateway-nodeport
-  namespace: kasten-io
-spec:
-  selector:
-    service: gateway
-  ports:
-  - name: http
-    port: 8000
-    nodePort: 32000
-  type: NodePort
-EOF
-```
-
-Forward the port to your local machine:
-
-```bash
-kubectl port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
+kubectl port-forward svc/gateway -n kasten-io 8080:8000 &
 ```
 
 Open the Kasten dashboard at [http://localhost:8080/k10/](http://localhost:8080/k10/).
