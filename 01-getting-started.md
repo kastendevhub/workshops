@@ -154,6 +154,8 @@ In the Kasten dashboard:
 | Secret Key | `minioadmin` |
 | Bucket | `lab-bucket-immutable` |
 | Region | leave blank or `us-east-1` |
+| Enable Immutable Backups | ✓ checked |
+| Retention Period | `20` days |
 
 4. Click **Validate and Save**. The profile should show a green checkmark.
 
@@ -184,6 +186,7 @@ spec:
       name: lab-bucket-immutable
       objectStoreType: S3
       pathType: Directory
+      protectionPeriod: P20D
       region: us-east-1
     type: ObjectStore
   type: Location
