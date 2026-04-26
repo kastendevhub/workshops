@@ -117,8 +117,6 @@ helm install minio minio/minio \
   --set resources.requests.memory=512Mi \
   --set rootUser=minioadmin \
   --set rootPassword=minioadmin \
-  --set service.type=NodePort \
-  --set service.nodePort=32010 \
   --wait
 ```
 
