@@ -82,6 +82,8 @@ Open the Kasten dashboard at [http://localhost:8080/k10/](http://localhost:8080/
 
 Accept the EULA on first access. No login is required — Kasten runs without authentication by default on a local cluster.
 
+> **Why no auth is acceptable here:** `kubectl port-forward` requires an active kubeconfig with sufficient cluster permissions to execute. Anyone who can reach the dashboard via this port-forward already has Kubernetes admin access — the cluster itself is the security boundary. In production you would configure authentication (tokenAuth, OIDC, etc.) so the dashboard is accessible over a stable endpoint. A future workshop will cover Kasten authentication options.
+
 ---
 
 ## Step 4 — Annotate the VolumeSnapshotClass
