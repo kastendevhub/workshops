@@ -84,14 +84,31 @@ Open the Kasten dashboard at [http://localhost:8080/k10/](http://localhost:8080/
 Accept the EULA on first access. Create a dedicated service account and generate a token for dashboard login:
 
 ```bash
-# Kasten 8.x no longer ships a shared k10-k10 service account.
-# Create a dedicated SA for dashboard access.
 kubectl create serviceaccount k10-dashboard -n kasten-io
 kubectl create clusterrolebinding k10-dashboard \
   --clusterrole=k10-admin \
   --serviceaccount=kasten-io:k10-dashboard
-kubectl create token k10-dashboard -n kasten-io --duration=24h
+
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/service-account-token
+metadata:
+  name: k10-dashboard-token
+  namespace: kasten-io
+  annotations:
+    kubernetes.io/service-account.name: k10-dashboard
+EOF
 ```
+
+Retrieve the token at any time with:
+
+```bash
+kubectl get secret k10-dashboard-token -n kasten-io \
+  -o jsonpath='{.data.token}' | base64 -d
+```
+
+> **Tip — logging in:** Copy the token output above, paste it into the **Token** field on the dashboard login page, and click **Sign In**.
 
 ---
 
