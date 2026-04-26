@@ -42,9 +42,9 @@ helm repo update
 # Linux (amd64):         k10tools_*_linux_amd64.tar.gz
 K10_VERSION=$(helm search repo kasten/k10 --output json | jq -r '.[0].app_version')
 curl -sL "https://github.com/kastenhq/external-tools/releases/download/${K10_VERSION}/k10tools_${K10_VERSION}_macOS_arm64.tar.gz" \
-  | tar -xz -C /usr/local/bin/ k10tools
-chmod +x /usr/local/bin/k10tools
-
+  | tar -xz -C /tmp/ k10tools
+sudo install -m 0755 /tmp/k10tools /usr/local/bin/k10tools
+k10tools --version
 k10tools primer
 ```
 
