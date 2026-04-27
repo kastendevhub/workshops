@@ -47,7 +47,7 @@ If the cluster dies, you need:
 - Workshop 0 completed (cluster running)
 - Workshop 1 completed (Kasten + MinIO + MongoDB installed, `s3-local` profile exists)
 - Workshop 2 recommended (MongoDB has the `mongo-hooks` Blueprint applied)
-- For the DR recovery section: ability to create a **second kind cluster**
+- For the DR recovery section: the same cluster is reused (MinIO must remain running)
 
 ---
 
@@ -188,14 +188,9 @@ kubectl wait pod/mysql-0 -n mysql --for=condition=Ready --timeout=120s
 
 Create some data:
 ```bash
-kubectl exec -it mysql-0 -n mysql -- \
-  mysql --user=root --password=ultrasecurepassword <<'SQL'
-CREATE DATABASE test;
-USE test;
-CREATE TABLE pets (name VARCHAR(20), owner VARCHAR(20), species VARCHAR(20));
-INSERT INTO pets VALUES ('Puffball','Diane','hamster');
-SELECT * FROM pets;
-SQL
+kubectl exec mysql-0 -n mysql -- \
+  mysql --user=root --password=ultrasecurepassword -h 127.0.0.1 \
+  -e "CREATE DATABASE test; USE test; CREATE TABLE pets (name VARCHAR(20), owner VARCHAR(20), species VARCHAR(20)); INSERT INTO pets VALUES ('Puffball','Diane','hamster'); SELECT * FROM pets;"
 ```
 
 Run the `label-backup` policy again and confirm **both** `mongodb` and `mysql` namespaces are backed up in the same policy run.
@@ -204,22 +199,27 @@ Run the `label-backup` policy again and confirm **both** `mongodb` and `mysql` n
 
 ## Step 4 — Enable Kasten Disaster Recovery
 
-Kasten 8.x uses **Quick DR mode** (enabled by default). In this mode, the application export data stored in the object store also contains the catalog metadata needed for recovery — no separate encrypted catalog export is required.
+Kasten's DR mechanism works by backing up the Kasten catalog itself to your object store. This requires two things: a user-provided passphrase (stored as a Kubernetes Secret) and a dedicated `k10-disaster-recovery-policy` that runs the catalog backup. Both must be in place **before** the disaster.
 
 ### 4a. Record your Cluster ID
 
-The Cluster ID is needed to point the recovery cluster to the right S3 prefix:
+The Cluster ID identifies your backup data in object storage. Record it now — you will need it during recovery.
 
 ```bash
-# The cluster ID appears in the MinIO bucket path: k10/<clusterID>/migration/
+kubectl get namespace kasten-io -o jsonpath='{.metadata.uid}'
+```
+
+Alternatively, after the first backup has run, it also appears as the top-level directory in MinIO:
+
+```bash
 mc ls local/lab-bucket-immutable/k10/ 2>/dev/null
 ```
 
-Note the UUID prefix — that is your **Cluster ID**.
+Save the UUID — that is your **Cluster ID**.
 
-### 4b. Store the DR passphrase
+### 4b. Create the DR passphrase secret
 
-A passphrase is needed to encrypt the recovery process. Create a Kubernetes Secret:
+The passphrase is used to encrypt the Kasten catalog backup. Kasten looks for it automatically in a Secret named `k10-dr-secret` with key `key`.
 
 ```bash
 DR_PASSPHRASE="your-strong-passphrase-here"
@@ -227,27 +227,107 @@ DR_PASSPHRASE="your-strong-passphrase-here"
 kubectl create secret generic k10-dr-secret \
   --namespace kasten-io \
   --from-literal=key="${DR_PASSPHRASE}"
-
-echo "Passphrase stored. Keep it safe — recovery is impossible without it."
 ```
 
-> **Important:** The secret key must be named `key` (not `passphrase`). Store the passphrase value in a password manager before proceeding.
+Store the passphrase in a password manager. Recovery is impossible without it.
 
-### 4c. Verify exports reach MinIO
+### 4c. Create and run the DR policy
 
-The label-backup policy you ran in Step 2 already exported data to MinIO. Verify:
+The `k10-disaster-recovery-policy` is a special Kasten policy that backs up the Kasten catalog itself. It uses `kdrSnapshotConfiguration` to distinguish it from a regular application backup. Apply it and trigger a run:
 
 ```bash
-mc ls local/lab-bucket-immutable/k10/ --recursive 2>/dev/null | grep -E "mongodb|mysql" | head -5
+cat <<EOF | kubectl apply -f -
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: k10-disaster-recovery-policy
+  namespace: kasten-io
+spec:
+  frequency: "@hourly"
+  retention:
+    hourly: 4
+    daily: 1
+    weekly: 1
+    monthly: 1
+    yearly: 1
+  selector:
+    matchExpressions:
+    - key: k10.kasten.io/appNamespace
+      operator: In
+      values:
+      - kasten-io
+  actions:
+  - action: backup
+    backupParameters:
+      filters: {}
+      profile:
+        name: s3-local
+        namespace: kasten-io
+  - action: export
+    exportParameters:
+      exportData:
+        enabled: true
+      profile:
+        name: s3-local
+        namespace: kasten-io
+    retention: {}
+  kdrSnapshotConfiguration:
+    exportCatalogSnapshot: true
+    takeLocalCatalogSnapshot: true
+EOF
 ```
 
-You should see kopia data for both `mongodb` and `mysql` under the cluster ID prefix. This exported data is what Quick DR uses for recovery.
+Trigger the DR policy run:
+
+```bash
+cat <<EOF | kubectl create -f -
+apiVersion: actions.kio.kasten.io/v1alpha1
+kind: RunAction
+metadata:
+  generateName: dr-policy-run-
+  namespace: kasten-io
+spec:
+  subject:
+    kind: Policy
+    name: k10-disaster-recovery-policy
+    namespace: kasten-io
+EOF
+```
+
+Watch the dashboard **Actions** view until both the backup and export phases complete.
+
+> **Order matters:** Run `label-backup` first (it backs up your applications), then run `k10-disaster-recovery-policy` (it backs up the Kasten catalog including the application restore points). Both must complete before you simulate the disaster.
+
+### 4d. Verify exports and DR catalog reach MinIO
+
+After both policies have run:
+
+```bash
+# Show the cluster ID directory
+mc ls local/lab-bucket-immutable/k10/
+
+# Show what is inside it
+CLUSTER_ID=$(mc ls local/lab-bucket-immutable/k10/ | awk '{print $NF}' | tr -d '/')
+mc ls "local/lab-bucket-immutable/k10/${CLUSTER_ID}/migration/"
+
+# Show the per-namespace Kopia repos (application data)
+mc ls "local/lab-bucket-immutable/k10/${CLUSTER_ID}/migration/repo/"
+
+# Show the DR catalog repo (written by the k10-disaster-recovery-policy)
+mc ls "local/lab-bucket-immutable/k10/${CLUSTER_ID}/migration/${CLUSTER_ID}/k10/repo/"
+```
+
+You should see:
+- `repo/` — application data Kopia repos, one UUID subdirectory per backed-up namespace. Files inside are random hashes because Kopia encrypts the entire repository.
+- `<cluster-id>/k10/repo/` — the **DR catalog repository**, written by `k10-disaster-recovery-policy`. This is what `KastenDRReview` and `KastenDRRestore` read during recovery. If this directory is missing, the DR policy did not run successfully before the disaster.
+- `label-backup/kopia/` — the export catalog for the `label-backup` policy.
+- Subdirectories for Kanister artifact exports if Workshop 2 Blueprints were used (e.g. `mongodb-backup/`).
 
 ---
 
 ## Step 5 — Simulate a Disaster
 
-Delete everything from the primary cluster (simulating a catastrophic failure):
+Delete the applications and Kasten, but **leave MinIO running**:
 
 ```bash
 # Delete the applications
@@ -255,34 +335,24 @@ kubectl delete namespace mongodb mysql
 
 # Delete Kasten itself
 helm uninstall k10 -n kasten-io
-kubectl delete namespace kasten-io
+kubectl delete namespace kasten-io --wait
+```
 
-# Optionally delete the cluster entirely (for a full DR test)
-# kind delete cluster --name kasten-training
+> **Why keep MinIO?** In production, your backup target (S3, Azure Blob, GCS) is always **external** to the cluster and survives a cluster failure — that is the fundamental design principle of DR. In this local lab, MinIO runs inside the cluster, so we simulate "external storage survives" by keeping it running while deleting everything else. Deleting the entire kind cluster would also destroy MinIO and leave nothing to restore from.
+
+Wait for the `kasten-io` namespace to fully terminate before continuing (CRD finalizers can take 1–3 minutes):
+
+```bash
+kubectl get namespace kasten-io -w
 ```
 
 ---
 
-## Step 6 — Recover on a New Cluster
+## Step 6 — Recover
 
-### 6a. Create the recovery cluster (if you deleted the original)
+### 6a. Reinstall Kasten
 
-```bash
-# Re-run Workshop 0 steps, or:
-cat <<EOF | kind create cluster --name kasten-recovery --config=-
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-  extraMounts:
-  - hostPath: /tmp/csi-data-dir
-    containerPath: /csi-data-dir
-EOF
-
-# Re-install CSI driver and VolumeSnapshot support (see Workshop 0)
-```
-
-### 6b. Install Kasten on the recovery cluster
+MinIO is still running with all your backup data. Reinstall Kasten on the same cluster:
 
 ```bash
 kubectl create namespace kasten-io
@@ -292,40 +362,59 @@ helm install k10 kasten/k10 \
   --wait
 ```
 
-### 6c. Restore the Kasten catalog
+### 6b. Restore the Kasten catalog
 
-**Option A — Dashboard restore** (recommended):
-
-1. Expose the Kasten dashboard on the recovery cluster (same NodePort + port-forward as Workshop 1 Step 3).
-2. Open the Kasten dashboard and navigate to **Settings → Disaster Recovery → Restore Kasten Backup**.
-3. Enter your object store credentials:
-   - Cloud Storage Provider: S3 Compatible
-   - S3 Endpoint: `http://minio.minio.svc.cluster.local:9000`
-   - Access Key: `minioadmin`
-   - Secret Key: `minioadmin`
-   - Bucket: `lab-bucket-immutable`
-4. Enter your **passphrase** (value from the `k10-dr-secret` key `key`).
-5. Select the source cluster ID and the most recent backup.
-6. Click **Restore** and wait for completion.
-
-**Option B — kubectl-native restore** (Kasten 8.x Quick DR):
-
-On the recovery cluster, recreate the `k10-dr-secret` and the `s3-local` profile, then use `KastenDRReview` + `KastenDRRestore`:
+Recreate the DR passphrase secret and the `s3-local` profile, then use `KastenDRReview` + `KastenDRRestore`:
 
 ```bash
-# Recreate the DR passphrase secret on the recovery cluster
+# Recreate the DR passphrase secret (same value used in Step 4b)
 kubectl create secret generic k10-dr-secret \
   --namespace kasten-io \
   --from-literal=key="your-strong-passphrase-here"
 
-# Recreate the s3-local profile (see Workshop 1 Step 6)
-# ... create k10secret-minio and s3-local Profile ...
+# Recreate the MinIO credentials secret and s3-local profile
+kubectl create secret generic k10secret-minio -n kasten-io \
+  --from-literal=aws_access_key_id=minioadmin \
+  --from-literal=aws_secret_access_key=minioadmin
 
-# Get the source cluster ID from the MinIO bucket
+cat <<EOF | kubectl apply -f -
+kind: Profile
+apiVersion: config.kio.kasten.io/v1alpha1
+metadata:
+  name: s3-local
+  namespace: kasten-io
+spec:
+  locationSpec:
+    credential:
+      secret:
+        apiVersion: v1
+        kind: secret
+        name: k10secret-minio
+        namespace: kasten-io
+      secretType: AwsAccessKey
+    objectStore:
+      endpoint: http://minio.minio.svc.cluster.local:9000
+      name: lab-bucket-immutable
+      objectStoreType: S3
+      pathType: Directory
+      protectionPeriod: 480h0m0s
+      region: us-east-1
+    type: ObjectStore
+  type: Location
+EOF
+```
+
+Get the source cluster ID from MinIO (this is the cluster ID you recorded in Step 4a):
+
+```bash
 SOURCE_CLUSTER_ID=$(mc ls local/lab-bucket-immutable/k10/ 2>/dev/null \
   | awk '{print $NF}' | tr -d '/' | head -1)
+echo "Source cluster ID: ${SOURCE_CLUSTER_ID}"
+```
 
-# Review available DR backups
+Review available DR snapshots:
+
+```bash
 cat <<EOF | kubectl apply -f -
 kind: KastenDRReview
 apiVersion: dr.kio.kasten.io/v1alpha1
@@ -338,10 +427,33 @@ spec:
     sourceClusterID: "${SOURCE_CLUSTER_ID}"
 EOF
 
-# Watch until complete
 kubectl get kastendrreview dr-review -n kasten-io -w
+```
 
-# Restore
+Once `KastenDRReview` reaches `state: success`, inspect its output to find the snapshot ID where `exportedCatalogAvailable: true`:
+
+```bash
+kubectl get kastendrreview dr-review -n kasten-io -o jsonpath='{.status.restorePoints.restorePointList}' | python3 -m json.tool
+```
+
+Extract the snapshot ID automatically:
+
+```bash
+SNAPSHOT_ID=$(kubectl get kastendrreview dr-review -n kasten-io -o json \
+  | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for rp in data['status']['restorePoints']['restorePointList']:
+    if rp.get('exportedCatalogAvailable'):
+        print(rp['id'])
+        break
+")
+echo "Snapshot ID: ${SNAPSHOT_ID}"
+```
+
+Restore the Kasten catalog using that snapshot. Note that `kastenDRReviewDetails` and `sourceClusterInfo` are mutually exclusive — use `kastenDRReviewDetails` when you already have a `KastenDRReview` result:
+
+```bash
 cat <<EOF | kubectl apply -f -
 kind: KastenDRRestore
 apiVersion: dr.kio.kasten.io/v1alpha1
@@ -349,25 +461,81 @@ metadata:
   name: dr-restore
   namespace: kasten-io
 spec:
-  sourceClusterInfo:
-    profileName: s3-local
-    sourceClusterID: "${SOURCE_CLUSTER_ID}"
+  kastenDRReviewDetails:
+    kastenDRReviewRef:
+      name: dr-review
+      namespace: kasten-io
+    id: "${SNAPSHOT_ID}"
 EOF
 
 kubectl get kastendrrestore dr-restore -n kasten-io -w
 ```
 
-> **Note:** The `k10restore` Helm chart is **deprecated since Kasten 7.5.0** and removed in 8.x. Use Option A (dashboard) or Option B (`KastenDRRestore` CRD) above.
+Wait for `state: success`. Once complete, all policies, profiles, and restore point metadata from the original cluster are available in this Kasten instance.
 
-### 6d. Restore Applications
+### 6c. Restore Applications
 
-Once the catalog is restored, all your `RestorePoints` from the original cluster appear in the dashboard:
+After the catalog is restored, `RestorePointContent` objects are already present. You do not need to import anything — just create the namespaces and trigger restore actions.
+
+Via the dashboard:
 
 1. **Applications → mongodb → Restore Points** — select the most recent
 2. **Restore** → confirm
 3. Repeat for `mysql`
 
+Via `kubectl`:
+
+```bash
+kubectl create namespace mongodb
+kubectl create namespace mysql
+
+# List available restore points for each app
+kubectl get restorepoint -n mongodb --sort-by='.metadata.creationTimestamp'
+kubectl get restorepoint -n mysql --sort-by='.metadata.creationTimestamp'
+
+# Pick the most recent name from each list, then trigger the restores
+MONGODB_RP=$(kubectl get restorepoint -n mongodb --sort-by='.metadata.creationTimestamp' \
+  -o jsonpath='{.items[*].metadata.name}' | awk '{print $NF}')
+MYSQL_RP=$(kubectl get restorepoint -n mysql --sort-by='.metadata.creationTimestamp' \
+  -o jsonpath='{.items[*].metadata.name}' | awk '{print $NF}')
+
+cat <<EOF | kubectl apply -f -
+kind: RestoreAction
+apiVersion: actions.kio.kasten.io/v1alpha1
+metadata:
+  name: mongodb-restore
+  namespace: mongodb
+spec:
+  targetNamespace: mongodb
+  overwriteExisting: true
+  subject:
+    apiVersion: apps.kio.kasten.io/v1alpha1
+    kind: RestorePoint
+    name: ${MONGODB_RP}
+    namespace: mongodb
+EOF
+
+cat <<EOF | kubectl apply -f -
+kind: RestoreAction
+apiVersion: actions.kio.kasten.io/v1alpha1
+metadata:
+  name: mysql-restore
+  namespace: mysql
+spec:
+  targetNamespace: mysql
+  overwriteExisting: true
+  subject:
+    apiVersion: apps.kio.kasten.io/v1alpha1
+    kind: RestorePoint
+    name: ${MYSQL_RP}
+    namespace: mysql
+EOF
+```
+
+Wait for both restore actions to complete (`state: Complete`).
+
 Validate data:
+
 ```bash
 export MONGODB_ROOT_PASSWORD=$(kubectl get secret mongo-mongodb \
   --namespace mongodb -o jsonpath="{.data.mongodb-root-password}" | base64 --decode)
@@ -378,8 +546,8 @@ kubectl exec -it statefulset/mongo-mongodb -n mongodb \
   -u root -p "$MONGODB_ROOT_PASSWORD" \
   --eval 'db.log.find()'
 
-kubectl exec -it mysql-0 -n mysql -- \
-  mysql --user=root --password=ultrasecurepassword \
+kubectl exec mysql-0 -n mysql -- \
+  mysql --user=root --password=ultrasecurepassword -h 127.0.0.1 \
   -e "USE test; SELECT * FROM pets;"
 ```
 
@@ -392,11 +560,14 @@ kubectl exec -it mysql-0 -n mysql -- \
 | 1 | `kubectl get namespace mongodb --show-labels` | Label `backup=true` present |
 | 2 | `kubectl get namespace mysql --show-labels` | Label `backup=true` present |
 | 3 | Dashboard → Policies → `label-backup` | Policy runs show both `mongodb` and `mysql` backed up |
-| 4 | `mc ls local/lab-bucket-immutable/k10/ --recursive \| grep mysql` | MySQL backup data present in MinIO |
-| 5 | After recovery: `kubectl get pods -n mongodb` | MongoDB running |
-| 6 | After recovery: `kubectl get pods -n mysql` | MySQL running |
-| 7 | After recovery: MongoDB query | `card` and `dice` records returned |
-| 8 | After recovery: MySQL query | `Puffball` record returned |
+| 4 | `kubectl get policy k10-disaster-recovery-policy -n kasten-io` | Policy exists with status `Success` |
+| 5 | `CLUSTER_ID=$(mc ls local/lab-bucket-immutable/k10/ \| awk '{print $NF}' \| tr -d '/'); mc ls "local/lab-bucket-immutable/k10/${CLUSTER_ID}/migration/${CLUSTER_ID}/k10/repo/"` | DR catalog files present (Kopia repo files) |
+| 6 | `kubectl get kastendrreview dr-review -n kasten-io -o jsonpath='{.status.state}'` | `success` |
+| 7 | `kubectl get kastendrrestore dr-restore -n kasten-io -o jsonpath='{.status.state}'` | `success` |
+| 8 | After recovery: `kubectl get pods -n mongodb` | MongoDB running |
+| 9 | After recovery: `kubectl get pods -n mysql` | MySQL running |
+| 10 | After recovery: MongoDB query | `card` and `dice` records returned |
+| 11 | After recovery: MySQL query | `Puffball` record returned |
 
 ---
 
@@ -404,12 +575,13 @@ kubectl exec -it mysql-0 -n mysql -- \
 
 - **The DR passphrase is irreplaceable.** Losing it means the catalog backup cannot be decrypted — full cluster recovery becomes impossible. Store it in a secrets manager *before* running the DR exercise.
 - **The `k10-dr-secret` key must be named `key`, not `passphrase`.** When creating the DR passphrase secret manually, use `--from-literal=key="..."`. Using any other key name (e.g. `passphrase`) causes `KastenDRReview` to fail with "Kubernetes secret does not contain key".
-- **The `k10restore` Helm chart is removed in Kasten 8.x.** Use the dashboard DR flow (Settings → Disaster Recovery → Restore Kasten Backup) or the `KastenDRRestore` CRD described in Step 6c.
-- **Kasten 8.x uses Quick DR by default** (`quickDisasterRecoveryEnabled: true`). In Quick DR mode, there is no separate encrypted catalog export — the catalog metadata is embedded in application exports. The old `k10-disaster-recovery-policy` with `backupParameters.dataStore` is not valid in Kasten 8.x.
-- **The `backupParameters.dataStore` field does not exist in Kasten 8.x.** Older workshop instructions using this field will be rejected with "unknown field". Use `backupParameters.profile` for the location profile in regular backup policies.
+- **DR requires a dedicated `k10-disaster-recovery-policy`, not a helm flag.** There is no helm value to "enable DR". You must create a Policy with `kdrSnapshotConfiguration.exportCatalogSnapshot: true` and run it before the disaster. Without this policy having run at least once, the DR catalog will not exist in object storage and `KastenDRReview` will report "repository not found".
+- **`KastenDRRestore` does not accept both `sourceClusterInfo` and `kastenDRReviewDetails` simultaneously.** They are mutually exclusive. If you have already run `KastenDRReview`, use `kastenDRReviewDetails` with the review reference and snapshot ID. Using both fields causes a validation error.
+- **Choose the restore point with `exportedCatalogAvailable: true`.** `KastenDRReview` may list multiple restore points. Only the one with `exportedCatalogAvailable: true` contains the full catalog export needed for recovery.
+- **The `k10restore` Helm chart is removed in Kasten 8.x.** Use the `KastenDRRestore` CRD described in Step 6b.
 - **`mysql:8.0.26` has no ARM64 image.** On Apple Silicon (M1/M2/M3) use `mysql:8.0` which is a multi-platform image. The specific patch version images often lack ARM64 manifests.
-- **Running two Kind clusters simultaneously is resource-intensive.** Each cluster needs approximately 4–6 GB of RAM. Docker Desktop must have at least 12 GB allocated.
 - **After deleting Kasten (`helm uninstall k10 -n kasten-io`), the `kasten-io` namespace may take 1–3 minutes to fully terminate** due to finalizers on Kasten CRDs. Wait for `kubectl get namespace kasten-io` to disappear before recreating it.
+- **Kasten determines its storage cluster ID from the existing bucket data.** When a freshly installed Kasten connects to a profile that already has backup data in the bucket, it adopts the cluster ID found there. This is why the `sourceClusterID` in `KastenDRReview` must match the UUID prefix visible in `mc ls local/lab-bucket-immutable/k10/`.
 
 ---
 
@@ -417,7 +589,6 @@ kubectl exec -it mysql-0 -n mysql -- \
 
 - [Kasten Disaster Recovery documentation](https://docs.kasten.io/latest/operating/dr.html)
 - [Kasten label-based policy selection](https://docs.kasten.io/latest/usage/protect.html#selecting-applications-by-label)
-- [k10restore Helm chart](https://docs.kasten.io/latest/operating/dr.html#restoring-kasten)
 - The passphrase is **not recoverable** — store it in a password manager or secrets vault (e.g. HashiCorp Vault, AWS Secrets Manager)
 - VolumeSnapshot data lives inside the cluster storage; the **exported** RestorePoint copies data to the external object store, making it portable to a new cluster. Always enable exports for DR scenarios.
 - Kasten Multi-Cluster (Workshop 4) can automate ongoing imports to a warm standby cluster, significantly reducing RTO.
