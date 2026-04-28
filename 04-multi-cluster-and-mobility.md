@@ -43,6 +43,26 @@ Transforms allow you to modify application metadata (StorageClass, annotations, 
 
 ---
 
+## Quick Resume
+
+If you are returning to this workshop with both clusters already running, re-establish the service tunnels before continuing:
+
+```bash
+# East cluster (kind-kasten-training) — Kasten dashboard on port 8080
+# http://localhost:8080/k10/
+kubectl --context=kind-kasten-training port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
+
+# West cluster (kind-kasten-west) — Kasten dashboard on port 8081
+# http://localhost:8081/k10/
+kubectl --context=kind-kasten-west port-forward svc/gateway-nodeport -n kasten-io 8081:8000 &
+
+# MinIO (on East cluster)
+kubectl --context=kind-kasten-training port-forward svc/minio -n minio 9000:9000 &
+mc alias set local http://localhost:9000 minioadmin minioadmin
+```
+
+---
+
 ## Step 1 — Create the West Cluster
 
 ```bash

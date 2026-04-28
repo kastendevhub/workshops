@@ -52,6 +52,23 @@ Both services run as Docker containers on your laptop, reachable from kind nodes
 
 ---
 
+## Quick Resume
+
+If you are returning to this workshop with the cluster already running, restart the external MinIO container and re-establish the Kasten tunnel:
+
+```bash
+# External MinIO (Docker container on the host) — restart if stopped
+docker start airgapped-minio
+
+# Kasten dashboard — http://localhost:8080/k10/
+kubectl --namespace kasten-io port-forward service/gateway 8080:80 &
+
+# mc alias for external MinIO
+mc alias set airgapped http://localhost:9100 airgapadmin airgapadmin
+```
+
+---
+
 ## Step 1 — Identify the Host IP Reachable from Kind Nodes
 
 Kind nodes communicate with Docker containers on the host via the Docker bridge gateway:

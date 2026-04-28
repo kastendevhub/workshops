@@ -51,6 +51,21 @@ If the cluster dies, you need:
 
 ---
 
+## Quick Resume
+
+If you are returning to this workshop with the cluster already running, re-establish the service tunnels before continuing:
+
+```bash
+# Kasten dashboard — http://localhost:8080/k10/
+kubectl --namespace kasten-io port-forward service/gateway 8080:80 &
+
+# MinIO
+kubectl port-forward svc/minio -n minio 9000:9000 &
+mc alias set local http://localhost:9000 minioadmin minioadmin
+```
+
+---
+
 ## Step 1 — Label the MongoDB Namespace
 
 Label-based policies let a single Kasten policy automatically include every namespace matching a set of labels. When a new application is labelled, it is immediately protected without modifying the policy.

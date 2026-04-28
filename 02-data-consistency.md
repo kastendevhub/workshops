@@ -34,6 +34,21 @@ kubectl get profile s3-local -n kasten-io
 
 ---
 
+## Quick Resume
+
+If you are returning to this workshop with the cluster already running, re-establish the service tunnels before continuing:
+
+```bash
+# Kasten dashboard — http://localhost:8080/k10/
+kubectl --namespace kasten-io port-forward service/gateway 8080:80 &
+
+# MinIO
+kubectl port-forward svc/minio -n minio 9000:9000 &
+mc alias set local http://localhost:9000 minioadmin minioadmin
+```
+
+---
+
 ## Part 1 — Crash Consistent (CSI) Backup
 
 A crash consistent backup captures a point-in-time snapshot of the volume without any application coordination. Like pulling the power plug — you get exactly what was on disk.

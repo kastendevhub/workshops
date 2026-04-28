@@ -56,6 +56,24 @@ Prometheus is embedded in the Kasten Helm chart. **Grafana was removed from the 
 
 ---
 
+## Quick Resume
+
+If you are returning to this workshop with the cluster already running, re-establish the service tunnels before continuing:
+
+```bash
+# Kasten dashboard — http://localhost:8080/k10/
+kubectl port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
+
+# MinIO
+kubectl port-forward svc/minio -n minio 9000:9000 &
+mc alias set local http://localhost:9000 minioadmin minioadmin
+
+# Grafana (once deployed in Part 3) — http://localhost:3000
+kubectl port-forward svc/grafana -n monitoring 3000:80 &
+```
+
+---
+
 ## Part 1 — Explore Available Metrics
 
 ### Access Prometheus

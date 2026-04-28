@@ -43,6 +43,24 @@ For production multi-tenant clusters, **OIDC** or **LDAP** is recommended.
 
 ---
 
+## Quick Resume
+
+If you are returning to this workshop with the cluster already running, re-establish the service tunnels before continuing:
+
+```bash
+# Keycloak — http://localhost:8082
+kubectl port-forward svc/keycloak -n keycloak 8082:80 &
+
+# Kasten dashboard — http://localhost:8080/k10/ (OIDC login required)
+kubectl --namespace kasten-io port-forward service/gateway 8080:80 &
+
+# MinIO
+kubectl port-forward svc/minio -n minio 9000:9000 &
+mc alias set local http://localhost:9000 minioadmin minioadmin
+```
+
+---
+
 ## Step 1 — Deploy Keycloak
 
 Keycloak is an open-source OIDC identity provider. Deploy it using the official image from `quay.io`:

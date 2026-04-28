@@ -26,6 +26,21 @@ By the end of this workshop you will have:
 
 ---
 
+## Quick Resume
+
+If you are returning to this workshop with the cluster already running, re-establish the service tunnels before continuing:
+
+```bash
+# Kasten dashboard — http://localhost:8080/k10/
+kubectl --namespace kasten-io port-forward service/gateway 8080:80 &
+
+# MinIO
+kubectl port-forward svc/minio -n minio 9000:9000 &
+mc alias set local http://localhost:9000 minioadmin minioadmin
+```
+
+---
+
 ## Step 1 — Run the Kasten Pre-flight Check
 
 Before installing Kasten, validate that the cluster storage meets requirements.
