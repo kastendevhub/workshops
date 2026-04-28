@@ -234,9 +234,25 @@ mc ls local/lab-bucket-immutable/k10/ 2>/dev/null
 
 Save the UUID — that is your **Cluster ID**.
 
-### 4b. Create the DR passphrase secret
+### 4b. Create the DR passphrase secret and enable DR
 
 The passphrase is used to encrypt the Kasten catalog backup. Kasten looks for it automatically in a Secret named `k10-dr-secret` with key `key`.
+
+#### Via the dashboard
+
+The dashboard combines steps 4b and 4c into a single form — enabling DR creates both the passphrase secret and the DR policy in one action.
+
+1. Navigate to **Settings** → **Disaster Recovery**.
+2. Click **Enable Disaster Recovery**.
+3. Enter your passphrase in the **Passphrase** field and confirm it.
+4. Select `s3-local` as the export profile.
+5. Click **Enable**.
+
+Kasten creates the `k10-dr-secret` Secret and the `k10-disaster-recovery-policy` Policy automatically. **Skip to step 4c to trigger the first run.**
+
+Store the passphrase in a password manager. Recovery is impossible without it.
+
+#### Via kubectl
 
 ```bash
 DR_PASSPHRASE="your-strong-passphrase-here"
@@ -250,7 +266,17 @@ Store the passphrase in a password manager. Recovery is impossible without it.
 
 ### 4c. Create and run the DR policy
 
-The `k10-disaster-recovery-policy` is a special Kasten policy that backs up the Kasten catalog itself. It uses `kdrSnapshotConfiguration` to distinguish it from a regular application backup. Apply it and trigger a run:
+> **Dashboard users:** the policy was already created in step 4b — go straight to triggering the run below.
+
+The `k10-disaster-recovery-policy` is a special Kasten policy that backs up the Kasten catalog itself. It uses `kdrSnapshotConfiguration` to distinguish it from a regular application backup.
+
+#### Via the dashboard
+
+Navigate to **Policies** and confirm `k10-disaster-recovery-policy` is listed. Click **Run Once** to trigger the first backup immediately.
+
+#### Via kubectl
+
+Apply the policy:
 
 ```bash
 cat <<EOF | kubectl apply -f -
