@@ -565,15 +565,21 @@ Via `kubectl`:
 kubectl create namespace mongodb
 kubectl create namespace mysql
 
-# List only exported restore points (RestorePointContent must reference the s3-local profile)
-kubectl get restorepoint -n mongodb --sort-by='.metadata.creationTimestamp'
-kubectl get restorepoint -n mysql --sort-by='.metadata.creationTimestamp'
+# List only exported restore points — the label k10.kasten.io/exportProfile
+# is present only on restore points backed by an object store export.
+# Local-only snapshots lack this label and cannot be used after a disaster.
+kubectl get restorepoint -n mongodb -l k10.kasten.io/exportProfile=s3-local \
+  --sort-by='.metadata.creationTimestamp'
+kubectl get restorepoint -n mysql -l k10.kasten.io/exportProfile=s3-local \
+  --sort-by='.metadata.creationTimestamp'
 
-# Pick the most recent exported restore point name from each list
-MONGODB_RP=$(kubectl get restorepoint -n mongodb --sort-by='.metadata.creationTimestamp' \
-  -o jsonpath='{.items[*].metadata.name}' | awk '{print $NF}')
-MYSQL_RP=$(kubectl get restorepoint -n mysql --sort-by='.metadata.creationTimestamp' \
-  -o jsonpath='{.items[*].metadata.name}' | awk '{print $NF}')
+# Pick the most recent exported restore point for each app
+MONGODB_RP=$(kubectl get restorepoint -n mongodb -l k10.kasten.io/exportProfile=s3-local \
+  --sort-by='.metadata.creationTimestamp' \
+  -o jsonpath='{.items[-1].metadata.name}')
+MYSQL_RP=$(kubectl get restorepoint -n mysql -l k10.kasten.io/exportProfile=s3-local \
+  --sort-by='.metadata.creationTimestamp' \
+  -o jsonpath='{.items[-1].metadata.name}')
 
 cat <<EOF | kubectl apply -f -
 kind: RestoreAction
