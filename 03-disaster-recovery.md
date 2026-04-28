@@ -205,8 +205,10 @@ Kasten's DR mechanism works by backing up the Kasten catalog itself to your obje
 
 The Cluster ID identifies your backup data in object storage. Record it now — you will need it during recovery.
 
+The Cluster ID is the UID of the **`default` namespace**, not the `kasten-io` namespace. The `default` namespace is used because it is the only namespace that cannot be deleted in a Kubernetes cluster — making its UID a stable, permanent identifier for the cluster even if Kasten is uninstalled and reinstalled.
+
 ```bash
-kubectl get namespace kasten-io -o jsonpath='{.metadata.uid}'
+kubectl get namespace default -o jsonpath='{.metadata.uid}'
 ```
 
 Alternatively, after the first backup has run, it also appears as the top-level directory in MinIO:
