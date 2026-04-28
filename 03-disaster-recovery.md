@@ -407,6 +407,42 @@ helm install k10 kasten/k10 \
 
 ### 6b. Restore the Kasten catalog
 
+#### Via the dashboard
+
+The dashboard provides a guided wizard for catalog recovery. You first need a location profile so Kasten knows where to look. Recreate `s3-local` through the dashboard:
+
+1. Navigate to **Settings → Locations** → **+ New Location Profile**.
+2. Configure:
+
+| Field | Value |
+|-------|-------|
+| Profile Name | `s3-local` |
+| Cloud Provider | S3 Compatible |
+| Endpoint | `http://minio.minio.svc.cluster.local:9000` |
+| Access Key ID | `minioadmin` |
+| Secret Access Key | `minioadmin` |
+| Bucket Name | `lab-bucket-immutable` |
+| Region | `us-east-1` |
+| Path Type | Directory |
+| Skip SSL Verify | ✓ |
+
+3. Click **Validate and Save**.
+
+Then restore the catalog:
+
+1. Navigate to **Settings → Disaster Recovery**.
+2. Click **Restore Kasten**.
+3. Select `s3-local` as the location profile.
+4. Enter the source **Cluster ID** (the UUID you recorded in Step 4a).
+5. Enter your **Passphrase** (the one you set in Step 4b). Kasten creates the `k10-dr-secret` from this automatically.
+6. Click **Find Snapshots**. Kasten queries the object store and lists available restore points.
+7. Select the restore point marked **Catalog Available** (equivalent to `exportedCatalogAvailable: true`).
+8. Click **Restore**.
+
+Watch progress in **Settings → Disaster Recovery**. Once the status shows success, all policies, profiles, and restore point metadata are available — skip to step 6c.
+
+#### Via kubectl
+
 Recreate the DR passphrase secret and the `s3-local` profile, then use `KastenDRReview` + `KastenDRRestore`:
 
 ```bash
