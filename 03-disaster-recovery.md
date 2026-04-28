@@ -551,9 +551,11 @@ Wait for `state: success`. Once complete, all policies, profiles, and restore po
 
 After the catalog is restored, `RestorePointContent` objects are already present. You do not need to import anything — just create the namespaces and trigger restore actions.
 
+> **Important:** Only restore points that were **exported** to the object store are usable after a disaster. Local-only snapshots live on the cluster's storage volumes and are lost when the cluster is gone. Always select a restore point that was produced by an export action (shown as **Exported** in the dashboard, or having a `RestorePointContent` backed by the object store profile). In this workshop, those are the restore points created by the `label-backup` policy's export step.
+
 Via the dashboard:
 
-1. **Applications → mongodb → Restore Points** — select the most recent
+1. **Applications → mongodb → Restore Points** — select the most recent **exported** restore point (marked with the export icon or the profile name `s3-local`)
 2. **Restore** → confirm
 3. Repeat for `mysql`
 
@@ -563,11 +565,11 @@ Via `kubectl`:
 kubectl create namespace mongodb
 kubectl create namespace mysql
 
-# List available restore points for each app
+# List only exported restore points (RestorePointContent must reference the s3-local profile)
 kubectl get restorepoint -n mongodb --sort-by='.metadata.creationTimestamp'
 kubectl get restorepoint -n mysql --sort-by='.metadata.creationTimestamp'
 
-# Pick the most recent name from each list, then trigger the restores
+# Pick the most recent exported restore point name from each list
 MONGODB_RP=$(kubectl get restorepoint -n mongodb --sort-by='.metadata.creationTimestamp' \
   -o jsonpath='{.items[*].metadata.name}' | awk '{print $NF}')
 MYSQL_RP=$(kubectl get restorepoint -n mysql --sort-by='.metadata.creationTimestamp' \
