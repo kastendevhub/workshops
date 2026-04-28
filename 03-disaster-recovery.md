@@ -513,21 +513,15 @@ kubectl get kastendrreview dr-review -n kasten-io -w
 Once `KastenDRReview` reaches `state: success`, inspect its output to find the snapshot ID where `exportedCatalogAvailable: true`:
 
 ```bash
-kubectl get kastendrreview dr-review -n kasten-io -o jsonpath='{.status.restorePoints.restorePointList}' | python3 -m json.tool
+kubectl get kastendrreview dr-review -n kasten-io -o jsonpath='{.status.restorePoints.restorePointList}' | jq .
 ```
 
 Extract the snapshot ID automatically:
 
 ```bash
 SNAPSHOT_ID=$(kubectl get kastendrreview dr-review -n kasten-io -o json \
-  | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for rp in data['status']['restorePoints']['restorePointList']:
-    if rp.get('exportedCatalogAvailable'):
-        print(rp['id'])
-        break
-")
+  | jq -r '.status.restorePoints.restorePointList[] | select(.exportedCatalogAvailable == true) | .id' \
+  | head -1)
 echo "Snapshot ID: ${SNAPSHOT_ID}"
 ```
 
