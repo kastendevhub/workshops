@@ -23,6 +23,7 @@ All subsequent workshops assume this environment is in place.
 - `kind` ≥ 0.20 — [install guide](https://kind.sigs.k8s.io/docs/user/quick-start/#installation)
 - `kubectl` — [install guide](https://kubernetes.io/docs/tasks/tools/)
 - `helm` ≥ 3.12 — [install guide](https://helm.sh/docs/intro/install/)
+- `mc` (MinIO client) — [install guide](https://min.io/docs/minio/linux/reference/minio-mc.html#install-mc)
 
 ---
 
