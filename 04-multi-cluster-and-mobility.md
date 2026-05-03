@@ -35,35 +35,41 @@ Transforms allow you to modify application metadata (StorageClass, annotations, 
 
 - Workshop 0 pattern: **two kind clusters** must be running:
   - `kasten-training` (East — source, already set up in Workshop 1)
-  - `kasten-west` (West — destination, needs Workshop 0 setup)
+  - `kasten-west` (West — destination, set up in Step 1 below)
 - Kasten installed on **both** clusters
 - `s3-local` Location Profile exists on the East cluster
 - MongoDB with sample data running in `mongodb` namespace on East
-- Access to both cluster dashboards (port-forwarded to different local ports)
+- Access to both cluster dashboards:
+  - East: `http://localhost:8080/k10/` via `kubectl port-forward`
+  - West: `http://localhost:8081/k10/` directly — no port-forward needed (kind `extraPortMappings` handles it)
 
 ---
 
 ## Quick Resume
 
-If you are returning to this workshop with both clusters already running, re-establish the service tunnels before continuing:
+If you are returning to this workshop with both clusters already running:
 
 ```bash
-# East cluster (kind-kasten-training) — Kasten dashboard on port 8080
+# East cluster — port-forward needed (no extraPortMappings in the Workshop 0 kind config)
 # http://localhost:8080/k10/
 kubectl --context=kind-kasten-training port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
 
-# West cluster (kind-kasten-west) — Kasten dashboard on port 8081
+# West cluster — no port-forward needed; extraPortMappings in the kind config binds
+# containerPort 32080 → hostPort 8081 on localhost automatically.
 # http://localhost:8081/k10/
-kubectl --context=kind-kasten-west port-forward svc/gateway-nodeport -n kasten-io 8081:8000 &
 
 # MinIO (on East cluster)
 kubectl --context=kind-kasten-training port-forward svc/minio -n minio 9000:9000 &
 mc alias set local http://localhost:9000 minioadmin minioadmin
 ```
 
+> **Why two different access methods?** See the Docker bridge explanation in Step 2.
+
 ---
 
 ## Step 1 — Create the West Cluster
+
+The kind config includes `extraPortMappings` so that the West Kasten dashboard is reachable at `http://localhost:8081/k10/` from your Mac browser without any port-forward.
 
 ```bash
 cat <<EOF | kind create cluster --name kasten-west --config=-
@@ -74,10 +80,15 @@ nodes:
   extraMounts:
   - hostPath: /tmp/csi-data-dir-west
     containerPath: /csi-data-dir
+  extraPortMappings:
+  - containerPort: 32080
+    hostPort: 8081
+    listenAddress: "0.0.0.0"
+    protocol: TCP
 EOF
 ```
 
-Apply Workshop 0 setup (CSI driver, VolumeSnapshot CRDs, StorageClass, annotation) to the West cluster:
+Apply Workshop 0 setup (VolumeSnapshot CRDs, CSI driver, StorageClass, annotation) to the West cluster:
 
 ```bash
 kubectl config use-context kind-kasten-west
@@ -122,42 +133,9 @@ kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
 # Install Kasten on West
 kubectl create namespace kasten-io
 helm install k10 kasten/k10 --namespace kasten-io --wait
-```
 
-Switch back to East:
-```bash
-kubectl config use-context kind-kasten-training
-```
-
----
-
-## Step 2 — Enable Multi-Cluster Manager on the East (Primary)
-
-> **Note:** The `k10multicluster` CLI tool was deprecated in Kasten 7.0.0. Multi-cluster setup is now done entirely through the Kasten dashboard UI.
-
-Ensure the East Kasten dashboard is accessible:
-
-```bash
-kubectl port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
-```
-
-In the East Kasten dashboard:
-
-1. Navigate to **Settings → Multi-Cluster Manager**.
-2. Click **Enable Multi-Cluster Manager**.
-3. Enter a name for the primary cluster (e.g. `cluster-east`) and confirm.
-
-The East cluster is now the Multi-Cluster primary. Open the Multi-Cluster dashboard at [http://localhost:8080/k10/#/clusters](http://localhost:8080/k10/#/clusters).
-
----
-
-## Step 3 — Add the West Cluster as Secondary
-
-First, expose the West Kasten dashboard via a NodePort service and create a service account for the East→West trust relationship:
-
-```bash
-# Create the same NodePort service on West
-cat <<EOF | kubectl --context=kind-kasten-west apply -f -
+# Expose Kasten gateway on NodePort 32080 — matches the extraPortMappings above
+cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
@@ -166,49 +144,220 @@ metadata:
 spec:
   selector:
     service: gateway
+  type: NodePort
   ports:
   - name: http
     port: 8000
-    nodePort: 32000
-  type: NodePort
+    targetPort: 8000
+    nodePort: 32080
+    protocol: TCP
 EOF
-
-# Port-forward West dashboard on a different local port
-kubectl --context=kind-kasten-west \
-  port-forward svc/gateway-nodeport -n kasten-io 8081:8000 &
-
-# Create a service account on West for multi-cluster registration
-kubectl --context=kind-kasten-west create serviceaccount k10-mc-east -n kasten-io
-kubectl --context=kind-kasten-west create clusterrolebinding k10-mc-east \
-  --clusterrole=k10-admin \
-  --serviceaccount=kasten-io:k10-mc-east
-
-# Generate a long-lived token for the service account
-WEST_TOKEN=$(kubectl --context=kind-kasten-west \
-  create token k10-mc-east -n kasten-io --duration=8760h)
-echo "West token: $WEST_TOKEN"
 ```
 
-Get the West Kasten URL that is reachable from East (must use Docker internal IP, not `localhost`):
+The West Kasten dashboard is now accessible at `http://localhost:8081/k10/` — no port-forward required.
+
+Switch back to East:
+```bash
+kubectl config use-context kind-kasten-training
+```
+
+---
+
+## Step 2 — Bootstrap the Primary (East) via CLI
+
+### Understanding the Docker bridge network
+
+Before configuring multi-cluster, it is important to understand how kind clusters communicate — and why using `localhost` in Kasten URLs will never work here.
+
+Each kind "node" is a Docker container. All kind containers are connected to the same Docker bridge network (the `kind` network, typically `172.18.0.0/16`). Because of this:
+
+- **A pod inside the East cluster can reach the West cluster** using the West node's Docker container IP and a NodePort. The pod sends traffic to its default gateway (the East node), which is itself on the `kind` bridge and can forward to `172.18.0.x`.
+- **`localhost` inside a pod means the pod itself**, not the host machine — so `localhost:8081` from a pod in East resolves to nothing useful.
+- **From your Mac browser, `172.18.0.x` is not reachable.** Docker Desktop runs containers inside a Linux VM. The Docker bridge network exists inside that VM and has no route to your macOS host network. This is why `extraPortMappings` was added to the West kind config: it binds `localhost:8081` on macOS to the West container's port 32080, making the West dashboard accessible from your browser without a port-forward.
+- **East has no `extraPortMappings`** (it was created in Workshop 0). Its dashboard is reached from the Mac via `kubectl port-forward` as usual.
+
+In summary:
+
+| Who is connecting | To what | URL to use |
+|---|---|---|
+| Your Mac browser → East dashboard | via port-forward | `http://localhost:8080/k10/` |
+| Your Mac browser → West dashboard | via extraPortMappings | `http://localhost:8081/k10/` |
+| East Kasten pods → West Kasten | Docker bridge | `http://<west-docker-ip>:32080/k10/` |
+| West Kasten pods → East Kasten | Docker bridge | `http://<east-docker-ip>:32080/k10/` |
+
+### Expose East Kasten via NodePort and bootstrap the primary
+
+```bash
+# Expose East Kasten on a NodePort so West cluster pods can reach it
+cat <<EOF | kubectl --context=kind-kasten-training apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-nodeport
+  namespace: kasten-io
+spec:
+  selector:
+    service: gateway
+  type: NodePort
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    nodePort: 32080
+    protocol: TCP
+EOF
+
+# Get the East node's Docker bridge IP — this is the URL West pods will use to reach East
+EAST_IP=$(docker inspect kasten-training-control-plane \
+  --format '{{.NetworkSettings.Networks.kind.IPAddress}}')
+echo "East Docker IP: ${EAST_IP}"
+
+# Create the multi-cluster namespace and bootstrap the primary
+kubectl --context=kind-kasten-training create namespace kasten-io-mc
+
+cat <<EOF | kubectl --context=kind-kasten-training apply -f -
+apiVersion: dist.kio.kasten.io/v1alpha1
+kind: Bootstrap
+metadata:
+  name: bootstrap-primary
+  namespace: kasten-io-mc
+spec:
+  clusters:
+    cluster-east:
+      name: cluster-east
+      primary: true
+      k10:
+        namespace: kasten-io
+        releaseName: k10
+        ingress:
+          url: http://${EAST_IP}:32080/k10/
+EOF
+```
+
+Verify a `Cluster` object was created for the primary:
+
+```bash
+kubectl --context=kind-kasten-training get clusters -n kasten-io-mc
+# Expected: cluster-east   <age>
+```
+
+---
+
+## Step 3 — Join West as Secondary via CLI
+
+### Create a join token on the Primary (East)
+
+```bash
+# Use `create` not `apply` — generateName is not supported with apply
+cat <<EOF | kubectl --context=kind-kasten-training create -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  generateName: join-token-secret-
+  namespace: kasten-io-mc
+type: dist.kio.kasten.io/join-token
+EOF
+```
+
+The controller auto-populates the token data. Retrieve it:
+
+```bash
+# List token secrets to find the generated name
+kubectl --context=kind-kasten-training get secrets -n kasten-io-mc \
+  --field-selector type=dist.kio.kasten.io/join-token
+
+JOIN_TOKEN_SECRET=$(kubectl --context=kind-kasten-training get secrets -n kasten-io-mc \
+  --field-selector type=dist.kio.kasten.io/join-token \
+  -o jsonpath='{.items[0].metadata.name}')
+
+JOIN_TOKEN=$(kubectl --context=kind-kasten-training get secret ${JOIN_TOKEN_SECRET} \
+  -n kasten-io-mc -o jsonpath='{.data.token}')
+
+echo "Token secret: ${JOIN_TOKEN_SECRET}"
+echo "Token (encoded): ${JOIN_TOKEN:0:40}..."
+```
+
+### Apply the join on the Secondary (West)
 
 ```bash
 WEST_IP=$(docker inspect kasten-west-control-plane \
-  --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')
-echo "West Kasten URL: http://${WEST_IP}:32000/k10/"
+  --format '{{.NetworkSettings.Networks.kind.IPAddress}}')
+EAST_IP=$(docker inspect kasten-training-control-plane \
+  --format '{{.NetworkSettings.Networks.kind.IPAddress}}')
+
+# mc-join secret carries the token from the Primary
+cat <<EOF | kubectl --context=kind-kasten-west apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mc-join
+  namespace: kasten-io
+data:
+  token: ${JOIN_TOKEN}
+EOF
+
+# mc-join-config tells Kasten the cluster names and ingress URLs
+# allow-insecure-primary-ingress is required because we use plain HTTP in this lab
+cat <<EOF | kubectl --context=kind-kasten-west apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mc-join-config
+  namespace: kasten-io
+data:
+  cluster-name: cluster-west
+  cluster-ingress: http://${WEST_IP}:32080/k10/
+  primary-ingress: http://${EAST_IP}:32080/k10/
+  allow-insecure-primary-ingress: "true"
+EOF
 ```
 
-In the **East** Kasten Multi-Cluster dashboard:
+> **Why `allow-insecure-primary-ingress: "true"`?** Kasten rejects HTTP primary ingress by default for security reasons. In a production environment the primary ingress URL must be HTTPS. For this lab we explicitly opt in to HTTP. Note that this option only works via the CLI path — the UI does not allow adding a secondary over plain HTTP.
 
-1. Click **Add Cluster**.
-2. Fill in:
-   | Field | Value |
-   |-------|-------|
-   | Cluster Name | `cluster-west` |
-   | Kasten URL | `http://<WEST_IP>:32000/k10/` (replace `<WEST_IP>` from above) |
-   | Service Account Token | paste `$WEST_TOKEN` |
-3. Click **Add**.
+### Validate the join
 
-In the Multi-Cluster dashboard, confirm both `cluster-east` and `cluster-west` appear with a green status.
+Poll `mc-join-status` on West until `status: joined` appears:
+
+```bash
+kubectl --context=kind-kasten-west get secret mc-join-status \
+  -n kasten-io -o jsonpath='{.data.status}' | base64 -d
+# Expected: joined
+```
+
+Inspect the full join outcome:
+
+```bash
+kubectl --context=kind-kasten-west get secret mc-join-status \
+  -n kasten-io -o go-template='{{range $k,$v := .data}}{{$k}}: {{$v | base64decode}}{{"\n"}}{{end}}'
+```
+
+Confirm the `mc-cluster-info` secret was created on West with the cluster identity:
+
+```bash
+kubectl --context=kind-kasten-west get secret mc-cluster-info \
+  -n kasten-io -o go-template='{{range $k,$v := .data}}{{$k}}: {{$v | base64decode}}{{"\n"}}{{end}}' \
+  2>/dev/null | grep -v "^$"
+# Expected fields: clusterName, endpoint, primaryIngress, primaryName
+```
+
+Confirm both clusters appear on East:
+
+```bash
+kubectl --context=kind-kasten-training get clusters -n kasten-io-mc
+# Expected:
+# NAME           AGE
+# cluster-east   <age>
+# cluster-west   <age>
+```
+
+### Challenge — Disconnect and reconnect West via the UI
+
+You have just registered West using the CLI. Now use the **East Kasten Multi-Cluster dashboard** to:
+
+1. Disconnect `cluster-west` from the primary.
+2. Reconnect it — this time using the UI instead of the CLI.
+
+Open the East dashboard at `http://localhost:8080/k10/` (port-forward required) and navigate to **Settings → Multi-Cluster Manager**. The CLI steps above should give you enough understanding to work through the UI independently.
 
 ---
 
@@ -421,13 +570,14 @@ kubectl --context=kind-kasten-west get statefulset mongo-mongodb -n mongodb \
 
 ## This workshop has challenges
 
-- **The `k10multicluster` CLI is deprecated (since Kasten 7.0.0).** All multi-cluster registration is now done via the Kasten dashboard UI. The Steps 2–3 above reflect this. If you find older instructions referencing `k10multicluster setup-primary` or `k10multicluster bootstrap`, they no longer apply.
-- **Kind clusters can only communicate via their Docker bridge network IP, not `localhost`.** The West Kasten URL that East can reach is `http://<WEST_DOCKER_IP>:32000/k10/`. Get the IP with `docker inspect kasten-west-control-plane --format '{{ .NetworkSettings.Networks.kind.IPAddress }}'`. Using `localhost` will cause the connection to fail silently.
-- **The `global-s3` profile on West must use East's Docker bridge IP for MinIO, not the Kubernetes service DNS name.** `minio.minio.svc.cluster.local:9000` only resolves inside the East cluster. From West, use `http://<EAST_DOCKER_IP>:32010` (MinIO's NodePort on East). Get the IP with `docker inspect kasten-training-control-plane --format '{{ .NetworkSettings.Networks.kind.IPAddress }}'`. Without this fix, the profile validation fails with "Could not find profile bucket" and the Import Policy reports "Profile is invalid".
+- **Kind clusters communicate via Docker bridge IPs, not `localhost`.** All kind nodes are Docker containers on the same `kind` bridge network (`172.18.0.0/16`). A pod inside East can reach the West node's IP because its default gateway (the East node) is on the same bridge. `localhost` inside a pod means the pod itself and is useless for cross-cluster traffic. See the full explanation in Step 2.
+- **`localhost` URLs work from your Mac browser only via port-forward or `extraPortMappings`.** The `172.18.0.x` addresses exist inside Docker Desktop's Linux VM and are not routable from macOS. `extraPortMappings` binds a container port to `localhost` on the Mac (used here for West), while `kubectl port-forward` does the same on demand (used for East).
+- **`allow-insecure-primary-ingress: "true"` is required for plain HTTP primaries.** Kasten rejects HTTP primary ingress URLs by default. This flag must be set in `mc-join-config` on the secondary. It is only supported via the CLI join path — the UI requires HTTPS.
+- **The `global-s3` profile on West must use East's Docker bridge IP for MinIO, not the Kubernetes service DNS name.** `minio.minio.svc.cluster.local:9000` only resolves inside the East cluster. From West, MinIO must be reached via a NodePort on East. Create one if it does not already exist: `kubectl --context=kind-kasten-training expose svc/minio -n minio --type=NodePort --name=minio-nodeport`, then use `http://<EAST_DOCKER_IP>:<nodeport>` in the Location Profile on West.
 - **The `RunAction` namespace field is required in Kasten 8.x.** The `RunAction` metadata must include `namespace: kasten-io`. Without it, the resource is created in the wrong namespace and the policy reference does not resolve.
 - **`kubectl apply` rejects `transformSetRef` inside `transforms[]` without `--validate=false`.** The client-side schema marks `json` as required within `TransformOrRef`, even though it is optional when a `transformSetRef` is provided. Use `--validate=false` to bypass this client-side validation error.
 - **Running two Kind clusters simultaneously is resource-intensive.** You need at least 12 GB of RAM allocated to Docker Desktop. If pods are stuck in `Pending`, open Docker Desktop → Settings → Resources → Memory and increase the limit.
-- **Port-forwarding two dashboards at once** (East on 8080, West on 8081) can silently stop working if either `kubectl port-forward` process dies. If you get connection refused on a dashboard, re-run the respective port-forward command.
+- **The East port-forward can silently die.** If you get connection refused on `localhost:8080`, re-run `kubectl --context=kind-kasten-training port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &`. The West dashboard does not have this problem — it uses `extraPortMappings`.
 - **The receive string for Import Policies** is found in East's dashboard: Applications → `mongodb` → the policy's **Copy Receive String** action. It encodes the bucket path and must be pasted verbatim — any truncation will cause the import to fail with a cryptic error.
 
 ---
@@ -435,7 +585,8 @@ kubectl --context=kind-kasten-west get statefulset mongo-mongodb -n mongodb \
 ## Tips & References
 
 - [Kasten Multi-Cluster documentation](https://docs.kasten.io/latest/multicluster/index.html)
-- [Kasten Multi-Cluster setup guide](https://docs.kasten.io/latest/multicluster/index.html) — the `k10multicluster` CLI (deprecated in 7.0.0) has been replaced by dashboard-based registration
+- [Kasten Multi-Cluster CLI setup](https://docs.kasten.io/latest/multicluster/getting_started#setting-up-via-cli) — Bootstrap, join tokens, and mc-join-config reference
+- [Allowing HTTP primary ingress](https://docs.kasten.io/latest/multicluster/how-tos/http_primary_ingress_connection/) — lab-only, not for production
 - [Kasten Transforms documentation](https://docs.kasten.io/latest/usage/migration.html#transforms)
 - [Kasten Import Policy](https://docs.kasten.io/latest/usage/migration.html#import-policy)
 - Multi-Cluster Manager is **optional** for migration — you can configure Export/Import policies independently on each cluster without the MCM UI. MCM simply provides a central management plane.
