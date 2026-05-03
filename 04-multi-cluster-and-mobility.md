@@ -77,21 +77,45 @@ nodes:
 EOF
 ```
 
-Apply Workshop 0 setup (CSI driver, VolumeSnapshot CRDs, annotation) to the West cluster:
+Apply Workshop 0 setup (CSI driver, VolumeSnapshot CRDs, StorageClass, annotation) to the West cluster:
 
 ```bash
 kubectl config use-context kind-kasten-west
 
-# Install CSI driver on west cluster
-cd csi-driver-host-path && ./deploy/kubernetes-latest/deploy.sh && cd ..
-
-# Install VolumeSnapshot CRDs
+# Install VolumeSnapshot CRDs first — the CSI driver deploy script creates a VolumeSnapshotClass
+# at the end and will fail with CRD-not-found if these are not already present
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml
 
+kubectl wait pods -n kube-system -l app.kubernetes.io/name=snapshot-controller --for=condition=Ready --timeout=120s
+
+# Install CSI driver — creates the VolumeSnapshotClass
+cd csi-driver-host-path && ./deploy/kubernetes-latest/deploy.sh && cd ..
+
+kubectl wait pods -n default -l app.kubernetes.io/name=csi-hostpathplugin --for=condition=Ready --timeout=120s
+
+# Create StorageClass and set as default
+cat <<EOF | kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-hostpath-sc
+provisioner: hostpath.csi.k8s.io
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+EOF
+
+kubectl patch storageclass csi-hostpath-sc \
+  -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+kubectl patch storageclass standard \
+  -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' 2>/dev/null || true
+
+# Annotate the VolumeSnapshotClass for Kasten
 kubectl annotate volumesnapshotclass csi-hostpath-snapclass \
   k10.kasten.io/is-snapshot-class="true"
 
