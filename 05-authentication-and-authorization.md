@@ -27,7 +27,6 @@ By the end of this workshop you will be able to:
 | Kubernetes Token | Yes | Limited |
 | LDAP / Active Directory | Yes | Yes |
 | OpenID Connect (OIDC) | Yes | Yes |
-| AWS IAM (EKS) | Yes | Yes |
 | OpenShift OAuth | Yes | Yes |
 
 For production multi-tenant clusters, **OIDC** or **LDAP** is recommended.
