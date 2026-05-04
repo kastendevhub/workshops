@@ -402,11 +402,49 @@ If you have set up HTTPS ingress on the primary, the UI flow is a natural extens
 
 A **Global Location Profile** is defined on the Primary cluster and can be pushed to all managed clusters via **Distributions**.
 
-In the Multi-Cluster dashboard:
+### Why you cannot reuse the `s3-local` endpoint directly
+
+The `s3-local` profile from Workshop 1 uses `http://minio.minio.svc.cluster.local:9000` as the MinIO endpoint. That DNS name only resolves inside the East cluster. When the profile is distributed to West, the West Kasten pods will try to resolve the same URL and fail — the `minio` Service does not exist in West's DNS.
+
+The Global Profile must use an endpoint reachable from **both** clusters. Since all kind nodes share the same Docker bridge network, East's Docker bridge IP is routable from West pods as well. First expose MinIO on a NodePort on East:
+
+```bash
+cat <<EOF | kubectl --context=kind-kasten-training apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-nodeport
+  namespace: minio
+spec:
+  selector:
+    app: minio
+  type: NodePort
+  ports:
+  - name: http
+    port: 9000
+    targetPort: 9000
+    nodePort: 32090
+    protocol: TCP
+EOF
+```
+
+Get the endpoint both clusters can reach:
+
+```bash
+EAST_IP=$(docker inspect kasten-training-control-plane \
+  --format '{{.NetworkSettings.Networks.kind.IPAddress}}')
+echo "MinIO endpoint for global profile: http://${EAST_IP}:32090"
+```
+
+### Create the Global Profile and distribute it
+
+In the Multi-Cluster dashboard on East (`http://localhost:8080/k10/`):
+
 1. **Global Profiles → + New Profile**
-2. Configure the same `s3-local` MinIO details from Workshop 1
-3. Name it `global-s3`
-4. Save the profile
+2. Set the endpoint to `http://<EAST_IP>:32090` (replace with value from above)
+3. Use the same bucket name, access key, and secret key as `s3-local` from Workshop 1
+4. Name it `global-s3`
+5. Save the profile
 
 Create a **Distribution** to push it to West:
 1. **Distributions → + Create Distribution**
@@ -418,7 +456,7 @@ Verify on West cluster:
 ```bash
 kubectl --context=kind-kasten-west get profile -n kasten-io
 ```
-The `global-s3` profile should appear.
+The `global-s3` profile should appear and its validation should pass — West pods can reach `http://<EAST_IP>:32090` directly via the Docker bridge.
 
 ---
 
@@ -610,7 +648,7 @@ kubectl --context=kind-kasten-west get statefulset mongo-mongodb -n mongodb \
 - **Kind clusters communicate via Docker bridge IPs, not `localhost`.** All kind nodes are Docker containers on the same `kind` bridge network (`172.18.0.0/16`). A pod inside East can reach the West node's IP because its default gateway (the East node) is on the same bridge. `localhost` inside a pod means the pod itself and is useless for cross-cluster traffic. See the full explanation in Step 2.
 - **`localhost` URLs work from your Mac browser only via port-forward or `extraPortMappings`.** The `172.18.0.x` addresses exist inside Docker Desktop's Linux VM and are not routable from macOS. `extraPortMappings` binds a container port to `localhost` on the Mac (used here for West), while `kubectl port-forward` does the same on demand (used for East).
 - **`allow-insecure-primary-ingress: "true"` is required for plain HTTP primaries.** Kasten rejects HTTP primary ingress URLs by default. This flag must be set in `mc-join-config` on the secondary. It is only supported via the CLI join path — the UI requires HTTPS.
-- **The `global-s3` profile on West must use East's Docker bridge IP for MinIO, not the Kubernetes service DNS name.** `minio.minio.svc.cluster.local:9000` only resolves inside the East cluster. From West, MinIO must be reached via a NodePort on East. Create one if it does not already exist: `kubectl --context=kind-kasten-training expose svc/minio -n minio --type=NodePort --name=minio-nodeport`, then use `http://<EAST_DOCKER_IP>:<nodeport>` in the Location Profile on West.
+- **The `global-s3` profile must use East's Docker bridge IP for MinIO, not the cluster-internal DNS name.** `minio.minio.svc.cluster.local:9000` only resolves inside the East cluster; West pods cannot reach it. Step 4 covers the NodePort setup and the correct endpoint to use.
 - **The `RunAction` namespace field is required in Kasten 8.x.** The `RunAction` metadata must include `namespace: kasten-io`. Without it, the resource is created in the wrong namespace and the policy reference does not resolve.
 - **`kubectl apply` rejects `transformSetRef` inside `transforms[]` without `--validate=false`.** The client-side schema marks `json` as required within `TransformOrRef`, even though it is optional when a `transformSetRef` is provided. Use `--validate=false` to bypass this client-side validation error.
 - **Running two Kind clusters simultaneously is resource-intensive.** You need at least 12 GB of RAM allocated to Docker Desktop. If pods are stuck in `Pending`, open Docker Desktop → Settings → Resources → Memory and increase the limit.
