@@ -350,6 +350,38 @@ kubectl --context=kind-kasten-training get clusters -n kasten-io-mc
 # cluster-west   <age>
 ```
 
+### Grant permissions to view the secondary cluster in the dashboard
+
+After a successful join, opening the Multi-Cluster dashboard on East may show `cluster-west` with an **Insufficient Permissions** warning. This is expected: the dashboard runs as `system:serviceaccount:kasten-io:dashboardbff-svc` when accessed via port-forward (no authentication), and that account has no rights on the secondary cluster yet.
+
+Kasten introduces its own cross-cluster RBAC (`K10ClusterRoleBinding`) because standard Kubernetes RBAC is scoped to a single cluster and cannot express permissions that span multiple clusters.
+
+Grant the dashboard service account `k10-multi-cluster-admin` on all clusters:
+
+```bash
+cat <<EOF | kubectl --context=kind-kasten-training apply -f -
+kind: K10ClusterRoleBinding
+apiVersion: auth.kio.kasten.io/v1alpha1
+metadata:
+  name: admin-all-clusters
+  namespace: kasten-io-mc
+spec:
+  k10ClusterRole: k10-multi-cluster-admin
+  clusters:
+    - selector: ""
+  subjects:
+    - kind: User
+      apiGroup: rbac.authorization.k8s.io
+      name: system:serviceaccount:kasten-io:dashboardbff-svc
+EOF
+```
+
+> `selector: ""` matches all registered clusters. `k10-multi-cluster-admin` gives full administrative access across the multi-cluster fleet.
+
+Refresh the Multi-Cluster dashboard — `cluster-west` should now show its application and policy counts instead of the permissions warning. You can also click **Grant Permissions** directly in the UI to achieve the same result.
+
+---
+
 ### Challenge — Disconnect and reconnect West via the UI (optional)
 
 > **This challenge is optional and requires additional infrastructure beyond the scope of this workshop.**
