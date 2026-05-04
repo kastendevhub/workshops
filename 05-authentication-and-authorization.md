@@ -159,6 +159,8 @@ spec:
           value: "false"
         - name: KC_HTTP_ENABLED
           value: "true"
+        - name: KC_DB
+          value: "dev-file"
         - name: KC_HOSTNAME_URL
           value: "http://keycloak.k10lab:32020"
         - name: KC_HOSTNAME_ADMIN_URL
@@ -198,7 +200,7 @@ echo "Keycloak ready"
 
 Access Keycloak admin console at [http://keycloak.k10lab:32020/admin/](http://keycloak.k10lab:32020/admin/) using `kcadmin`/`kcadmin`.
 
-> **Note:** Keycloak `start-dev` mode uses an **in-memory H2 database**. All realm configuration is lost if the pod restarts. In this workshop we rely on the pod staying running throughout the session.
+> **Note:** Keycloak `start-dev` mode defaults to an in-memory H2 database. Setting `KC_DB=dev-file` switches to a file-backed H2 database stored on the container filesystem, so realm configuration survives pod restarts within the same pod lifecycle. Configuration is still lost if the pod is deleted and recreated.
 
 ---
 
