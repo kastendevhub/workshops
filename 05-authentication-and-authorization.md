@@ -66,6 +66,67 @@ Keycloak is an open-source OIDC identity provider. Deploy it using the official 
 
 > **Note:** The Bitnami Keycloak Helm chart images are no longer available via `docker.io/bitnami` (deprecated in 2025). Use the official Keycloak image from `quay.io/keycloak/keycloak` directly.
 
+### 1a. Register a local hostname for Keycloak
+
+Keycloak's OIDC issuer URL must be reachable from two very different contexts:
+
+- **Your Mac browser** — to display the login page when Kasten redirects you there
+- **Kasten pods inside the kind cluster** — to fetch the OIDC discovery document and exchange tokens
+
+`localhost` only works for the browser (inside a pod it means the pod itself). `host.docker.internal` only works for pods (Docker Desktop no longer adds it to the Mac's `/etc/hosts`, so the browser cannot resolve it).
+
+The solution is a custom hostname — `keycloak.k10lab` — registered in both places:
+
+```bash
+# Mac /etc/hosts — browser resolves keycloak.k10lab to localhost (port-forward)
+echo "127.0.0.1 keycloak.k10lab" | sudo tee -a /etc/hosts
+```
+
+```bash
+# CoreDNS — kind pods resolve keycloak.k10lab to the East node's Docker bridge IP
+EAST_IP=$(docker inspect kasten-training-control-plane \
+  --format '{{.NetworkSettings.Networks.kind.IPAddress}}')
+
+kubectl patch configmap coredns -n kube-system --patch "
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        hosts {
+          ${EAST_IP} keycloak.k10lab
+          fallthrough
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+           max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+"
+
+kubectl rollout restart deployment/coredns -n kube-system
+kubectl rollout status deployment/coredns -n kube-system --timeout=60s
+```
+
+With this setup:
+- Browser: `keycloak.k10lab:32020` → `127.0.0.1:32020` → port-forward → Keycloak ✓
+- Pods: `keycloak.k10lab:32020` → CoreDNS → `172.18.0.2:32020` → NodePort → Keycloak ✓
+- OIDC issuer is `http://keycloak.k10lab:32020/realms/k10lab-realm` — identical in both contexts ✓
+
+### 1b. Deploy Keycloak
+
 ```bash
 kubectl create namespace keycloak
 
@@ -99,9 +160,9 @@ spec:
         - name: KC_HTTP_ENABLED
           value: "true"
         - name: KC_HOSTNAME_URL
-          value: "http://host.docker.internal:8082"
+          value: "http://keycloak.k10lab:32020"
         - name: KC_HOSTNAME_ADMIN_URL
-          value: "http://host.docker.internal:8082"
+          value: "http://keycloak.k10lab:32020"
         ports:
         - containerPort: 8080
           name: http
@@ -124,22 +185,20 @@ EOF
 kubectl wait deployment/keycloak -n keycloak --for=condition=Available --timeout=180s
 ```
 
-Port-forward for local access:
+Port-forward so `keycloak.k10lab:32020` resolves to Keycloak from your Mac browser:
 ```bash
-kubectl port-forward svc/keycloak -n keycloak 8082:80 &
+kubectl port-forward svc/keycloak -n keycloak 32020:80 &
 ```
 
-Wait for Keycloak to start (it takes about 15 seconds):
+Wait for Keycloak to start:
 ```bash
 until kubectl logs deployment/keycloak -n keycloak 2>/dev/null | grep -q "started in"; do sleep 3; done
 echo "Keycloak ready"
 ```
 
-Access Keycloak admin console at [http://localhost:8082/admin/](http://localhost:8082/admin/) using `kcadmin`/`kcadmin`.
+Access Keycloak admin console at [http://keycloak.k10lab:32020/admin/](http://keycloak.k10lab:32020/admin/) using `kcadmin`/`kcadmin`.
 
-> **Important:** Setting `KC_HOSTNAME_URL=http://host.docker.internal:8082` makes Keycloak issue tokens with an issuer that is reachable from both the browser (via port-forward on 8082) and Kasten pods (via Docker Desktop's `host.docker.internal`). Without this setting, the issuer URL will use whatever hostname the request was made with, creating a mismatch between the browser's redirect URL and Kasten's token validation.
-
-> **Note:** Keycloak `start-dev` mode uses an **in-memory H2 database**. All realm configuration is lost if the pod restarts. For persistent Keycloak in a training environment, add `--set db.type=dev-file` or use a PostgreSQL database. In this workshop we rely on the pod staying running throughout the session.
+> **Note:** Keycloak `start-dev` mode uses an **in-memory H2 database**. All realm configuration is lost if the pod restarts. In this workshop we rely on the pod staying running throughout the session.
 
 ---
 
@@ -202,7 +261,7 @@ Before installing Kasten, test the OIDC flow using the public [OIDC Debugger](ht
 
 1. Get the authorization endpoint:
    ```bash
-   curl -s http://localhost:8082/realms/k10lab-realm/.well-known/openid-configuration \
+   curl -s http://keycloak.k10lab:32020/realms/k10lab-realm/.well-known/openid-configuration \
      | jq -r '.authorization_endpoint'
    ```
 
@@ -244,9 +303,7 @@ helm install mongo-app2 bitnami/mongodb \
 Reinstall (or upgrade) Kasten with OIDC parameters:
 
 ```bash
-# The OIDC issuer must use host.docker.internal so it is reachable from both
-# the browser (via port-forward 8082) and Kasten pods (Docker Desktop bridge).
-OIDC_ISSUER="http://host.docker.internal:8082/realms/k10lab-realm"
+OIDC_ISSUER="http://keycloak.k10lab:32020/realms/k10lab-realm"
 
 # Get the Kasten client secret from Keycloak:
 # Keycloak admin → Clients → Kasten → Credentials → Client Secret
