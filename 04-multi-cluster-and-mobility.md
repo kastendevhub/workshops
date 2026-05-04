@@ -350,14 +350,19 @@ kubectl --context=kind-kasten-training get clusters -n kasten-io-mc
 # cluster-west   <age>
 ```
 
-### Challenge — Disconnect and reconnect West via the UI
+### Challenge — Disconnect and reconnect West via the UI (optional)
 
-You have just registered West using the CLI. Now use the **East Kasten Multi-Cluster dashboard** to:
+> **This challenge is optional and requires additional infrastructure beyond the scope of this workshop.**
 
-1. Disconnect `cluster-west` from the primary.
-2. Reconnect it — this time using the UI instead of the CLI.
+The Kasten Multi-Cluster UI refuses to register a secondary over plain HTTP — it requires the primary's ingress URL to be HTTPS. Making that work in a kind environment involves:
 
-Open the East dashboard at `http://localhost:8080/k10/` (port-forward required) and navigate to **Settings → Multi-Cluster Manager**. The CLI steps above should give you enough understanding to work through the UI independently.
+1. Installing an ingress controller on the primary (East) cluster.
+2. Creating a TLS ingress for the Kasten gateway backed by a self-signed or local CA certificate.
+3. Adding that CA certificate to Kasten's truststore on the secondary (West) so it can verify the primary's TLS certificate.
+
+All three steps are achievable but are beyond the scope of this workshop.
+
+If you have set up HTTPS ingress on the primary, the UI flow is a natural extension of what you did via CLI: disconnect `cluster-west` in **Settings → Multi-Cluster Manager** on East, then use **Add Cluster** in the same screen to reconnect it. The concepts are identical — cluster name, ingress URL, and a join token — just presented through a form instead of YAML manifests.
 
 ---
 
