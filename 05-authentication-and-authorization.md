@@ -239,8 +239,15 @@ Also ensure **Email verified** is toggled on for each user.
 1. **Clients → Create Client**
 2. Set **Client ID**: `Kasten`
 3. Enable **Client authentication** (confidential)
-4. Set **Valid Redirect URIs**: `*` (or your Kasten dashboard URL)
-5. Save
+4. Under **Authentication flow**, also enable **Implicit flow**
+5. Set **Valid Redirect URIs**: `*` (or your Kasten dashboard URL)
+6. Save
+
+> **Why implicit flow?** This is pure OIDC theory, not Kasten-specific. There are two common flows:
+> - **Authorization Code flow** (what Kasten uses in production): the browser receives a short-lived *code*, the server-side app exchanges it for tokens behind the scenes. The token never travels through the browser. Requires `client_secret`.
+> - **Implicit flow** (what the OIDC Debugger uses): the IdP returns the `id_token` directly in the browser redirect, with no back-channel exchange. Useful for testing and debugging because you can read the token immediately in the browser.
+>
+> Kasten itself only uses the Authorization Code flow, so implicit flow is only needed here to let the OIDC Debugger verify that your realm, client, and group mapper are configured correctly before you involve Kasten.
 
 ### 2e. Add a Groups Mapper
 
