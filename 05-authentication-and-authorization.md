@@ -125,11 +125,79 @@ With this setup:
 - Pods: `keycloak.k10lab:32020` → CoreDNS → `172.18.0.2:32020` → NodePort → Keycloak ✓
 - OIDC issuer is `http://keycloak.k10lab:32020/realms/k10lab-realm` — identical in both contexts ✓
 
-### 1b. Deploy Keycloak
+### 1b. Deploy PostgreSQL
+
+Keycloak uses PostgreSQL as its backing database so that realm configuration, users, clients, and groups survive pod restarts and pod deletions.
 
 ```bash
 kubectl create namespace keycloak
 
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: keycloak
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        env:
+        - name: POSTGRES_DB
+          value: keycloak
+        - name: POSTGRES_USER
+          value: keycloak
+        - name: POSTGRES_PASSWORD
+          value: keycloak
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: keycloak
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+EOF
+
+kubectl wait deployment/postgres -n keycloak --for=condition=Available --timeout=120s
+```
+
+### 1c. Deploy Keycloak
+
+```bash
 cat <<'EOF' | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -160,7 +228,13 @@ spec:
         - name: KC_HTTP_ENABLED
           value: "true"
         - name: KC_DB
-          value: "dev-file"
+          value: "postgres"
+        - name: KC_DB_URL
+          value: "jdbc:postgresql://postgres.keycloak.svc.cluster.local:5432/keycloak"
+        - name: KC_DB_USERNAME
+          value: "keycloak"
+        - name: KC_DB_PASSWORD
+          value: "keycloak"
         - name: KC_HOSTNAME_URL
           value: "http://keycloak.k10lab:32020"
         - name: KC_HOSTNAME_ADMIN_URL
@@ -200,7 +274,7 @@ echo "Keycloak ready"
 
 Access Keycloak admin console at [http://keycloak.k10lab:32020/admin/](http://keycloak.k10lab:32020/admin/) using `kcadmin`/`kcadmin`.
 
-> **Note:** Keycloak `start-dev` mode defaults to an in-memory H2 database. Setting `KC_DB=dev-file` switches to a file-backed H2 database stored on the container filesystem, so realm configuration survives pod restarts within the same pod lifecycle. Configuration is still lost if the pod is deleted and recreated.
+> **Note:** Keycloak is backed by PostgreSQL with a PVC, so realm configuration, users, clients, and groups survive pod restarts and pod deletions. The `postgres-data` PVC persists data as long as the namespace exists.
 
 ---
 
@@ -537,7 +611,7 @@ Log out and log back in as different users to verify access:
 - **Keycloak 24.x requires `firstName` + `lastName` for the password grant type.** Users created without first/last name fail login with "Account is not fully set up" even with `requiredActions: []` and `emailVerified: true`. Always set `firstName`, `lastName`, and `emailVerified: true` when creating users.
 - **`k10-ns-admin` does not exist in Kasten 8.x.** The role was removed. For namespace-scoped admin access, create a `RoleBinding` (not `ClusterRoleBinding`) referencing `k10-admin`. This grants full Kasten admin rights scoped to that namespace only.
 - **`PolicyPreset` API changed in Kasten 8.x.** The top-level `frequency`, `retention`, and `actions` fields were replaced by nested `backup` and `export` sub-objects. The old format is rejected with "unknown field" errors.
-- **Keycloak `start-dev` mode is stateless — all config is lost on pod restart.** If the Keycloak pod restarts, all realms/users/clients must be recreated. For training purposes this is acceptable, but be aware that a cluster node restart will wipe your OIDC configuration.
+- **Keycloak requires PostgreSQL to be ready before it starts.** If Keycloak starts before the `postgres` pod is accepting connections, it will crash-loop. The `kubectl wait deployment/postgres` step in 1b ensures this ordering. If Keycloak enters `CrashLoopBackOff`, check `kubectl logs deployment/postgres -n keycloak` and wait for it to be fully ready before the Keycloak pod restarts.
 - **The OIDC Debugger ([https://oidcdebugger.com/](https://oidcdebugger.com/)) cannot reach `localhost:8082`.** The debugger performs the redirect from its cloud server, which cannot reach your local port-forward. Use it conceptually only, or expose Keycloak publicly via `ngrok http 8082`.
 
 ---
