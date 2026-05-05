@@ -399,7 +399,7 @@ helm upgrade --install k10 kasten/k10 \
   --set auth.oidcAuth.enabled=true \
   --set auth.oidcAuth.providerURL="${OIDC_ISSUER}" \
   --set "auth.oidcAuth.redirectURL=http://localhost:8080" \
-  --set "auth.oidcAuth.scopes=groups profile email" \
+  --set "auth.oidcAuth.scopes=profile email" \
   --set auth.oidcAuth.prompt=select_account \
   --set auth.oidcAuth.clientID=Kasten \
   --set auth.oidcAuth.clientSecret="${OIDC_CLIENT_SECRET}" \
@@ -407,6 +407,8 @@ helm upgrade --install k10 kasten/k10 \
   --set auth.oidcAuth.groupClaim=groups \
   --wait
 ```
+
+> **Why `groups` is not in `scopes`:** `scopes` lists the OAuth2 scopes Kasten requests from Keycloak (e.g. `profile`, `email`). The `groups` claim is injected into the token by the Group Membership mapper configured in step 2e — it is a **claim**, not a scope. Including `groups` in `scopes` causes Keycloak to reject the authorization request with "Invalid scopes" because no Keycloak scope named `groups` exists. `groupClaim=groups` tells Kasten which claim in the token to read for group membership, which is a separate concern from what scopes are requested.
 
 Open [http://localhost:8080/k10/](http://localhost:8080/k10/) — you should be redirected to the Keycloak login page.
 
@@ -611,6 +613,7 @@ Log out and log back in as different users to verify access:
 - **Keycloak 24.x requires `firstName` + `lastName` for the password grant type.** Users created without first/last name fail login with "Account is not fully set up" even with `requiredActions: []` and `emailVerified: true`. Always set `firstName`, `lastName`, and `emailVerified: true` when creating users.
 - **`k10-ns-admin` does not exist in Kasten 8.x.** The role was removed. For namespace-scoped admin access, create a `RoleBinding` (not `ClusterRoleBinding`) referencing `k10-admin`. This grants full Kasten admin rights scoped to that namespace only.
 - **`PolicyPreset` API changed in Kasten 8.x.** The top-level `frequency`, `retention`, and `actions` fields were replaced by nested `backup` and `export` sub-objects. The old format is rejected with "unknown field" errors.
+- **Login fails with "Invalid scopes: groups profile email openid".** Do not include `groups` in `auth.oidcAuth.scopes`. `groups` is a token **claim** injected by the Group Membership mapper — it is not a Keycloak scope. Use `scopes=profile email` and let `groupClaim=groups` tell Kasten which claim to read.
 - **Keycloak requires PostgreSQL to be ready before it starts.** If Keycloak starts before the `postgres` pod is accepting connections, it will crash-loop. The `kubectl wait deployment/postgres` step in 1b ensures this ordering. If Keycloak enters `CrashLoopBackOff`, check `kubectl logs deployment/postgres -n keycloak` and wait for it to be fully ready before the Keycloak pod restarts.
 - **The OIDC Debugger ([https://oidcdebugger.com/](https://oidcdebugger.com/)) cannot reach `localhost:8082`.** The debugger performs the redirect from its cloud server, which cannot reach your local port-forward. Use it conceptually only, or expose Keycloak publicly via `ngrok http 8082`.
 
