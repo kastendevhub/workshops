@@ -277,7 +277,7 @@ helm upgrade --install k10 kasten/k10 \
   --namespace kasten-io \
   --reuse-values \
   --set global.airgapped.repository=${GATEWAY_IP}:5000 \
-  --set global.pullSecrets[0]=registry-secret \
+  --set "global.pullSecrets[0]=registry-secret" \
   --version ${K10_VERSION} \
   --wait --timeout=600s
 ```
