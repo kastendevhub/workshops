@@ -161,24 +161,15 @@ docker push localhost:5000/alpine
 
 ## Step 4 — Configure Kind to Trust the Private Registry
 
-Containerd in the kind node needs three changes appended to `config.toml`:
-1. `config_path` pointing to `certs.d` so per-registry `hosts.toml` files are read
-2. A `hosts.toml` declaring the registry as HTTP-capable (`skip_verify`)
-3. Auth credentials in `config.toml` so containerd can authenticate without Kubernetes `imagePullSecrets`
-
-> **Why containerd auth instead of `imagePullSecrets`?** Kasten's Helm chart sets `global.pullSecrets` to propagate credentials, but in practice the chart does not inject `imagePullSecrets` into pod specs — it relies on the container runtime having the credentials configured directly. Configuring auth in `config.toml` is the reliable path for kind.
+Containerd in the kind node needs two things: `config_path` set so per-registry `hosts.toml` files are read, and a `hosts.toml` declaring the registry as HTTP-capable. Authentication is handled separately by the Kasten Helm chart in Step 6.
 
 ```bash
-# 1. Enable certs.d and add registry auth credentials in one pass
+# 1. Enable certs.d in the kind node's containerd config
 docker exec kasten-training-control-plane bash -c "
-cat >> /etc/containerd/config.toml << EOF
+cat >> /etc/containerd/config.toml << 'EOF'
 
 [plugins.\"io.containerd.grpc.v1.cri\".registry]
   config_path = \"/etc/containerd/certs.d\"
-
-[plugins.\"io.containerd.grpc.v1.cri\".registry.configs.\"${GATEWAY_IP}:5000\".auth]
-  username = \"testuser\"
-  password = \"testpassword\"
 EOF
 "
 
@@ -192,7 +183,7 @@ cat > /etc/containerd/certs.d/${GATEWAY_IP}:5000/hosts.toml << TOML
 TOML
 "
 
-# 3. Restart containerd to apply both changes
+# 3. Restart containerd to apply changes
 docker exec kasten-training-control-plane systemctl restart containerd
 sleep 5
 ```
@@ -268,33 +259,40 @@ docker run --rm --network kind curlimages/curl:latest \
 
 Moving to a private registry does not require uninstalling Kasten — that would destroy all restore points and policies stored in the catalog. Use `helm upgrade` instead: it restarts pods with the new image source while preserving all Kasten state.
 
-Create (or update) the image pull secret for the private registry:
+> **Why `helm upgrade --install` and not `helm uninstall` + `helm install`?** Uninstalling Kasten deletes the `kasten-io` namespace and with it the catalog PVC — all restore point metadata is lost. `helm upgrade` only replaces the running pods and updates the Helm release values; the catalog PVC and all its data are untouched. Use uninstall only if you explicitly want a clean slate (e.g. the DR exercise in Workshop 3).
 
-```bash
-kubectl create secret docker-registry registry-secret \
-  --namespace kasten-io \
-  --docker-server=${GATEWAY_IP}:5000 \
-  --docker-username=testuser \
-  --docker-password=testpassword \
-  --dry-run=client -o yaml | kubectl apply -f -
-```
+Kasten's Helm chart handles private registry authentication via `secrets.dockerConfig` and `global.imagePullSecret`. The chart creates a secret named `k10-ecr` from the base64-encoded Docker config and injects it as `imagePullSecrets` into every pod spec automatically. The secret name `k10-ecr` is fixed by the chart — do not change it.
 
-Upgrade Kasten to pull all images from the private registry:
+Build a Docker config file with the registry credentials and pass it to Helm:
 
 ```bash
 GATEWAY_IP=$(docker inspect kasten-training-control-plane \
   --format '{{ (index .NetworkSettings.Networks "kind").Gateway }}')
 K10_VERSION=$(helm search repo kasten/k10 --output json | jq -r '.[0].app_version')
 
+# Build a Docker config with inline credentials.
+# On macOS, Docker Desktop stores credentials in the system keychain rather than
+# ~/.docker/config.json, so create the config file explicitly.
+REGISTRY_AUTH=$(echo -n "testuser:testpassword" | base64)
+cat > /tmp/registry-config.json << EOF
+{
+  "auths": {
+    "${GATEWAY_IP}:5000": {
+      "auth": "${REGISTRY_AUTH}"
+    }
+  }
+}
+EOF
+
 helm upgrade --install k10 kasten/k10 \
   --namespace kasten-io \
   --reuse-values \
   --set "global.airgapped.repository=${GATEWAY_IP}:5000" \
+  --set "secrets.dockerConfig=$(base64 < /tmp/registry-config.json | tr -d '\n')" \
+  --set "global.imagePullSecret=k10-ecr" \
   --version "${K10_VERSION}" \
   --wait --timeout=600s
 ```
-
-> **Why `helm upgrade --install` and not `helm uninstall` + `helm install`?** Uninstalling Kasten deletes the `kasten-io` namespace and with it the catalog PVC — all restore point metadata is lost. `helm upgrade` only replaces the running pods and updates the Helm release values; the catalog PVC and all its data are untouched. Use uninstall only if you explicitly want a clean slate (e.g. the DR exercise in Workshop 3).
 
 Verify all pods pull from the private registry:
 
@@ -437,7 +435,9 @@ mc ls airgapped/airgapped-bucket/ --recursive | head -10
 
 - **The private registry must be reachable from both the host and kind nodes.** Bind the registry to `0.0.0.0:5000` (the default for `docker run -p 5000:5000`). From the host, access it at `localhost:5000`. From kind nodes, access it at `${GATEWAY_IP}:5000` (Docker bridge gateway). These are two different URLs for the same service.
 - **Containerd `certs.d` requires `config_path` to be set explicitly.** Writing a `hosts.toml` into `/etc/containerd/certs.d/<registry>/hosts.toml` is not enough on its own — containerd only reads it if `config_path = "/etc/containerd/certs.d"` is also set under `[plugins."io.containerd.grpc.v1.cri".registry]` in `config.toml`. Without this, containerd ignores the `hosts.toml` and tries HTTPS, producing "http: server gave HTTP response to HTTPS client".
-- **`global.pullSecrets` does not inject `imagePullSecrets` into Kasten pod specs.** Despite being set, the Helm chart does not propagate `global.pullSecrets` into deployment pod templates. The only reliable authentication path for kind is to add credentials directly to the kind node's `config.toml` under `[plugins."io.containerd.grpc.v1.cri".registry.configs."<registry>".auth]` and restart containerd. With this in place, no `imagePullSecrets` is needed in any pod spec.
+- **Do not use `global.pullSecrets` for private registry auth with Kasten.** The correct parameters are `secrets.dockerConfig` (base64-encoded Docker config) and `global.imagePullSecret=k10-ecr`. The chart creates the `k10-ecr` secret itself and injects it into all pod specs. `global.pullSecrets` is ignored for this purpose.
+- **On macOS, `~/.docker/config.json` may not contain actual credentials.** Docker Desktop stores credentials in the macOS keychain (`"credsStore": "desktop"`) rather than the config file. Always build the Docker config explicitly with inline `auth` credentials as shown in Step 6 rather than relying on `~/.docker/config.json`.
+- **The `k10-ecr` secret name is fixed by the Helm chart.** Do not attempt to use a different name for `global.imagePullSecret`.
 - **`k10tools image copy` takes 10–20 minutes** due to the number of Kasten component images. Plan for this before the session. Re-runs are fast because Docker caches pulled layers.
 - **`k10tools image copy --insecure-registry`** is required when the private registry uses HTTP (no TLS). In production, use a registry with a valid TLS certificate.
 - **NFS on macOS Docker Desktop is not supported.** The Docker Desktop VM does not have the NFS kernel module, so `rpc.nfsd` containers (`erichough/nfs-server`, `itsthenetwork/nfs-server-alpine`) always fail with "does not support NFS export". This workshop uses MinIO instead of NFS for the backup location — MinIO is simpler, cross-platform, and equally representative of air-gapped S3 storage.
@@ -453,4 +453,4 @@ mc ls airgapped/airgapped-bucket/ --recursive | head -10
 - [MinIO Docker Quickstart](https://min.io/docs/minio/container/index.html)
 - In production, the private registry would be JFrog Artifactory, Harbor, AWS ECR, or Azure ACR — all work with `k10tools image copy` by specifying the appropriate `--registry` value.
 - Kasten's `global.airgapped.repository` Helm value prefixes **all** image references in the chart — you don't need to configure images individually.
-- For kind, configure registry credentials in containerd's `config.toml` on each node rather than relying on `global.pullSecrets` — the Helm chart does not inject `imagePullSecrets` into pod specs.
+- Private registry credentials are passed to Kasten via `secrets.dockerConfig` (base64 Docker config) + `global.imagePullSecret=k10-ecr`. The chart creates the `k10-ecr` secret and injects it into all pod specs. See the [Kasten air-gapped credentials documentation](https://docs.kasten.io/latest/install/offline#providing-credentials-if-local-container-repository-is-private).
