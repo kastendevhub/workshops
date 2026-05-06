@@ -273,12 +273,16 @@ kubectl create secret docker-registry registry-secret \
 Upgrade Kasten to pull all images from the private registry:
 
 ```bash
+GATEWAY_IP=$(docker inspect kasten-training-control-plane \
+  --format '{{ (index .NetworkSettings.Networks "kind").Gateway }}')
+K10_VERSION=$(helm search repo kasten/k10 --output json | jq -r '.[0].app_version')
+
 helm upgrade --install k10 kasten/k10 \
   --namespace kasten-io \
   --reuse-values \
-  --set global.airgapped.repository=${GATEWAY_IP}:5000 \
+  --set "global.airgapped.repository=${GATEWAY_IP}:5000" \
   --set "global.pullSecrets[0]=registry-secret" \
-  --version ${K10_VERSION} \
+  --version "${K10_VERSION}" \
   --wait --timeout=600s
 ```
 
