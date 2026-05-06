@@ -301,6 +301,7 @@ spec:
     targetPort: 8025
 EOF
 
+kubectl wait deployment/mailhog -n kasten-io --for=condition=Available --timeout=60s
 kubectl port-forward svc/mailhog -n kasten-io 8025:8025 &
 echo "Mailhog UI: http://localhost:8025"
 ```
