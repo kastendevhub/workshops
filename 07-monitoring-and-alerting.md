@@ -53,7 +53,7 @@ This workshop uses a **pull model**: Grafana reaches into the `kasten-io` namesp
 - Workshop 1 completed (Kasten + MinIO + MongoDB installed, `mongodb-backup` policy run at least once)
 - Access to an SMTP server for email alerts (Gmail, Mailhog, or similar)
 - `kubectl`, `curl`, `jq` installed
-- OIDC may be enabled or disabled — this workshop connects Grafana **directly to the Prometheus pod** (`prometheus-server.kasten-io.svc.cluster.local:9090`), bypassing the Kasten gateway entirely, so OIDC authentication has no effect on metrics access.
+- OIDC may be enabled or disabled — this workshop connects Grafana **directly to the Prometheus service** (`prometheus-server.kasten-io.svc.cluster.local`, port 80), bypassing the Kasten gateway entirely, so OIDC authentication has no effect on metrics access.
 
 ---
 
@@ -247,14 +247,14 @@ Open [http://localhost:3000](http://localhost:3000) and log in with username `ad
 
 ### Connect Grafana to Kasten Prometheus
 
-Connect Grafana directly to the Prometheus pod, bypassing the Kasten gateway. This avoids any authentication issues (OIDC, basic auth) because Prometheus itself has no auth. Kasten's `prometheus-server` NetworkPolicy allows port 9090 from any namespace.
+Connect Grafana directly to the Prometheus service (port 80), bypassing the Kasten gateway. This avoids any authentication issues (OIDC, basic auth) because Prometheus itself has no auth. Kasten's `prometheus-server` NetworkPolicy allows port 9090 (pod port) from any namespace, and the service exposes it on port 80.
 
 1. In Grafana: **Connections → Data Sources → Add data source**
 2. Select **Prometheus**
-3. Set **URL** to: `http://prometheus-server.kasten-io.svc.cluster.local:9090`
+3. Set **URL** to: `http://prometheus-server.kasten-io.svc.cluster.local`
 4. Click **Save & Test** — you should see "Successfully queried the Prometheus API"
 
-> **Tip:** You can verify direct reachability from inside the cluster: `kubectl run --rm -it probe --image=curlimages/curl --restart=Never -n monitoring -- curl -s -o /dev/null -w '%{http_code}' http://prometheus-server.kasten-io.svc.cluster.local:9090/-/healthy`
+> **Tip:** You can verify direct reachability from inside the cluster: `kubectl run --rm -it probe --image=curlimages/curl --restart=Never -n monitoring -- curl -s -o /dev/null -w '%{http_code}' http://prometheus-server.kasten-io.svc.cluster.local/k10/prometheus/-/healthy`
 
 ### 3a. Configure SMTP for Email Alerts
 
