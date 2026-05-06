@@ -236,10 +236,10 @@ echo "Kasten version: $K10_VERSION"
 docker run --rm \
   gcr.io/kasten-images/k10tools:${K10_VERSION} \
   image copy \
-  --registry ${GATEWAY_IP}:5000 \
-  --username testuser \
-  --password testpassword \
-  --insecure-registry
+  --dst-registry ${GATEWAY_IP}:5000 \
+  --dst-username testuser \
+  --dst-password testpassword \
+  --dst-registry-insecure
 ```
 
 > **Note:** This pulls all Kasten images from `gcr.io/kasten-images` and pushes them to your private registry. The list of images changes with each release — always use `k10tools image copy` rather than maintaining a manual image list.
