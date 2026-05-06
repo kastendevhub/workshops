@@ -100,32 +100,35 @@ You should see targets for each Kasten microservice: `catalog-svc`, `executor`, 
 
 ### Query Catalog Metrics via curl
 
-With the port-forward running, query the Prometheus API directly from your laptop:
+With the port-forward running, query completed backup counts directly from your laptop — this metric always has data once at least one backup has run:
 
 ```bash
-curl -s "http://localhost:9090/k10/prometheus/api/v1/query?query=catalog_actions_count" \
-  | jq '.data.result[] | {metric: .metric, value: .value[1]}'
+curl -s "http://localhost:9090/k10/prometheus/api/v1/query" \
+  --data-urlencode 'query=catalog_actions_count{status="complete",type="backup"}' \
+  | jq '.data.result[] | {namespace: .metric.namespace, policy: .metric.policy, value: .value[1]}'
 ```
 
 Expected output:
-```
-# HELP catalog_actions_count Number of actions
-# TYPE catalog_actions_count gauge
-catalog_actions_count{liveness="live",namespace="mongodb",policy="mongodb-backup",status="complete",type="backup"} 1
-catalog_actions_count{liveness="live",namespace="mongodb",policy="mongodb-backup",status="pending",type="backup"} 0
-catalog_actions_count{liveness="live",namespace="mongodb",policy="mongodb-backup",status="running",type="backup"} 0
+```json
+{
+  "namespace": "mongodb",
+  "policy": "mongodb-backup",
+  "value": "3"
+}
 ```
 
 ### PromQL Queries
 
 Open the Prometheus expression browser at [http://localhost:9090/k10/prometheus/graph](http://localhost:9090/k10/prometheus/graph) and try these queries:
 
-| Query | What it shows |
-|-------|--------------|
-| `catalog_actions_count{policy="mongodb-backup",status="complete",type="backup"}` | Completed backups for the mongodb policy |
-| `catalog_actions_count{status="failed",type="backup"}` | All failed backup actions |
-| `catalog_persistent_volume_free_space_percent` | Catalog PVC free space as a percentage |
-| `catalog_actions_count{liveness="live",status="complete",type="export"}` | Available exported RestorePoints |
+| Query | What it shows | Available |
+|-------|--------------|-----------|
+| `catalog_actions_count{policy="mongodb-backup",status="complete",type="backup"}` | Completed backups for the mongodb policy | Now |
+| `catalog_persistent_volume_free_space_percent` | Catalog PVC free space as a percentage | Now |
+| `catalog_actions_count{liveness="live",status="complete",type="export"}` | Available exported RestorePoints | Now |
+| `catalog_actions_count{status="failed",type="backup"}` | All failed backup actions | After Part 2 |
+
+> **Note:** The `status="failed"` metric only appears after at least one backup failure has occurred. If you query it now it returns an empty result — run Part 2 first.
 
 Switch from **Table** to **Graph** view to see metric trends over time.
 
