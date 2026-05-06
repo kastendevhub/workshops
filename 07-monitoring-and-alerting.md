@@ -184,7 +184,7 @@ Wait for the action to fail (it will retry 3 times), then query Prometheus:
 
 ```bash
 # Query for failed backups
-curl -s "http://localhost:8080/k10/prometheus/api/v1/query" \
+curl -s "http://localhost:9090/k10/prometheus/api/v1/query" \
   --data-urlencode 'query=catalog_actions_count{status="failed",type="backup"}' \
   | jq '.data.result[].value[1]'
 ```
@@ -509,7 +509,7 @@ Hints:
 
 ```bash
 # Check current catalog PVC usage
-curl -s "http://localhost:8080/k10/prometheus/api/v1/query" \
+curl -s "http://localhost:9090/k10/prometheus/api/v1/query" \
   --data-urlencode 'query=catalog_persistent_volume_free_space_percent' \
   | jq '.data.result'
 ```
