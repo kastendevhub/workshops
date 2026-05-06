@@ -244,10 +244,11 @@ docker run --rm \
 
 > **Note:** This pulls all Kasten images from `gcr.io/kasten-images` and pushes them to your private registry. The list of images changes with each release — always use `k10tools image copy` rather than maintaining a manual image list.
 
-Verify that images were pushed:
+Verify that images were pushed. The registry is bound to `${GATEWAY_IP}:5000` — a Docker bridge IP that is not directly reachable from the Mac terminal on Docker Desktop. Run the check from inside a container on the same `kind` network:
 
 ```bash
-curl -sk -u testuser:testpassword \
+docker run --rm --network kind curlimages/curl:latest \
+  -sk -u testuser:testpassword \
   "http://${GATEWAY_IP}:5000/v2/_catalog" | jq '.repositories | length'
 # Expected: several dozen images
 ```
