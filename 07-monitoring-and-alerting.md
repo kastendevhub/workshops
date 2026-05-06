@@ -399,26 +399,33 @@ curl -s http://localhost:8025/api/v2/messages | jq '.count'
 ### 5a. Create via Grafana UI
 
 1. In Grafana: **Alerting → Alert Rules → + New Alert Rule**
-2. Configure:
+2. Set the query and expressions (**Set a query and alert condition** section):
 
 | Field | Value |
 |-------|-------|
-| Rule name | `Kasten Backup Failure` |
-| Folder | Create a new folder `Kasten Alerts` |
 | Query (A) | `increase(catalog_actions_count{status="failed",type="backup"}[1h])` |
 | Reduce (B) | Input: `A`, Function: `Last` |
 | Threshold (C) | Input: `B`, IS ABOVE `0` |
 
-> **Why `increase()` over a window and not a raw scalar?** `catalog_actions_count{status="failed"}` is cumulative — it only ever goes up. Using the raw value with `IS ABOVE 0` means the alert fires forever after the first failure and never resolves, even when all subsequent backups succeed. Using `increase(...[1h])` measures how much the count grew in the last hour: if no new failures occurred, `increase()` returns 0 and the alert resolves automatically. The Reduce step is needed because `increase()` with a range vector returns a time series, which must be collapsed to a scalar before the threshold can evaluate it.
-| Evaluation interval | `1m` |
+> **Why `increase()` over a window and not a raw scalar?** `catalog_actions_count{status="failed"}` is cumulative — it only ever goes up. Using the raw value with `IS ABOVE 0` fires forever after the first failure and never resolves. `increase(...[1h])` measures new failures in the last hour: if no new failures occurred it returns 0 and the alert resolves automatically. The Reduce step is needed because `increase()` with a range vector returns a time series that must be collapsed to a scalar before the threshold can evaluate it.
+
+3. Set the evaluation behaviour (**Alert evaluation behaviour** section):
+
+| Field | Value |
+|-------|-------|
+| Folder | Create a new folder `Kasten Alerts` |
+| Evaluation group | Create a new group, name it `kasten-rules`, interval `1m` |
 | Pending period | `1m` |
+
+4. Configure notifications (**Configure notifications** section):
+
+| Field | Value |
+|-------|-------|
 | Contact point | `email-alerts` |
 | Summary | `Kasten backup failures detected` |
-| Description | `One or more Kasten backup actions have failed.` |
+| Description | `One or more Kasten backup actions have failed in the last hour.` |
 
-3. Save the rule.
-
-> **Why `sum(...)` and not `increase(...)`?** `catalog_actions_count` is a **gauge** (not a Prometheus counter), so `increase()` is not appropriate. The failed count is cumulative — once a failure is recorded, the gauge never decreases for that status. Use `sum(...) > 0` to alert whenever any failure exists in the current Prometheus scrape.
+5. Set the rule name to `Kasten Backup Failure` and click **Save rule and exit**.
 
 ### 5b. Create via kubectl/API (alternative)
 
