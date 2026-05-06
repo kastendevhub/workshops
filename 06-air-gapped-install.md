@@ -255,37 +255,34 @@ docker run --rm --network kind curlimages/curl:latest \
 
 ---
 
-## Step 6 — Install Kasten from the Private Registry
+## Step 6 — Install or Upgrade Kasten from the Private Registry
 
-If Kasten is already installed, uninstall it first:
+Moving to a private registry does not require uninstalling Kasten — that would destroy all restore points and policies stored in the catalog. Use `helm upgrade` instead: it restarts pods with the new image source while preserving all Kasten state.
 
-```bash
-helm uninstall k10 -n kasten-io 2>/dev/null || true
-# Wait for namespace to terminate
-kubectl wait namespace/kasten-io --for=delete --timeout=180s 2>/dev/null || true
-kubectl create namespace kasten-io
-```
-
-Create the image pull secret for the private registry:
+Create (or update) the image pull secret for the private registry:
 
 ```bash
 kubectl create secret docker-registry registry-secret \
   --namespace kasten-io \
   --docker-server=${GATEWAY_IP}:5000 \
   --docker-username=testuser \
-  --docker-password=testpassword
+  --docker-password=testpassword \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Install Kasten from the private registry:
+Upgrade Kasten to pull all images from the private registry:
 
 ```bash
-helm install k10 kasten/k10 \
+helm upgrade --install k10 kasten/k10 \
   --namespace kasten-io \
+  --reuse-values \
   --set global.airgapped.repository=${GATEWAY_IP}:5000 \
   --set global.pullSecrets[0]=registry-secret \
   --version ${K10_VERSION} \
   --wait --timeout=600s
 ```
+
+> **Why `helm upgrade --install` and not `helm uninstall` + `helm install`?** Uninstalling Kasten deletes the `kasten-io` namespace and with it the catalog PVC — all restore point metadata is lost. `helm upgrade` only replaces the running pods and updates the Helm release values; the catalog PVC and all its data are untouched. Use uninstall only if you explicitly want a clean slate (e.g. the DR exercise in Workshop 3).
 
 Verify all pods pull from the private registry:
 
