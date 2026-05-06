@@ -251,7 +251,7 @@ Connect Grafana directly to the Prometheus service (port 80), bypassing the Kast
 
 1. In Grafana: **Connections → Data Sources → Add data source**
 2. Select **Prometheus**
-3. Set **URL** to: `http://prometheus-server.kasten-io.svc.cluster.local`
+3. Set **URL** to: `http://prometheus-server.kasten-io.svc.cluster.local/k10/prometheus`
 4. Click **Save & Test** — you should see "Successfully queried the Prometheus API"
 
 > **Tip:** You can verify direct reachability from inside the cluster: `kubectl run --rm -it probe --image=curlimages/curl --restart=Never -n monitoring -- curl -s -o /dev/null -w '%{http_code}' http://prometheus-server.kasten-io.svc.cluster.local/k10/prometheus/-/healthy`
