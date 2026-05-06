@@ -201,11 +201,12 @@ kubectl create secret docker-registry registry-secret \
 Test that the kind node can pull from the private registry:
 
 ```bash
-cat <<EOF | kubectl apply -f -
+cat <<EOF | kubectl apply -n default -f -
 apiVersion: v1
 kind: Pod
 metadata:
   name: airgapped-test
+  namespace: default
 spec:
   imagePullSecrets:
   - name: registry-secret
@@ -215,8 +216,8 @@ spec:
     command: ["tail", "-f", "/dev/null"]
 EOF
 
-kubectl wait pod/airgapped-test --for=condition=Ready --timeout=60s
-kubectl delete pod airgapped-test
+kubectl wait pod/airgapped-test -n default --for=condition=Ready --timeout=60s
+kubectl delete pod airgapped-test -n default
 kubectl delete secret registry-secret -n default
 ```
 
