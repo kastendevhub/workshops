@@ -405,10 +405,11 @@ curl -s http://localhost:8025/api/v2/messages | jq '.count'
 |-------|-------|
 | Rule name | `Kasten Backup Failure` |
 | Folder | Create a new folder `Kasten Alerts` |
-| Query (A) | `sum(catalog_actions_count{status="failed",type="backup"})` |
-| Threshold (B) | Input: `A`, IS ABOVE `0` |
+| Query (A) | `increase(catalog_actions_count{status="failed",type="backup"}[1h])` |
+| Reduce (B) | Input: `A`, Function: `Last` |
+| Threshold (C) | Input: `B`, IS ABOVE `0` |
 
-> **Why no Reduce step?** `catalog_actions_count` is a gauge — it already returns a single scalar value, not a time series. Grafana will warn "Reduce operation is not needed" if you add a Reduce expression. Delete it and point the Threshold directly at A.
+> **Why `increase()` over a window and not a raw scalar?** `catalog_actions_count{status="failed"}` is cumulative — it only ever goes up. Using the raw value with `IS ABOVE 0` means the alert fires forever after the first failure and never resolves, even when all subsequent backups succeed. Using `increase(...[1h])` measures how much the count grew in the last hour: if no new failures occurred, `increase()` returns 0 and the alert resolves automatically. The Reduce step is needed because `increase()` with a range vector returns a time series, which must be collapsed to a scalar before the threshold can evaluate it.
 | Evaluation interval | `1m` |
 | Pending period | `1m` |
 | Contact point | `email-alerts` |
@@ -548,7 +549,7 @@ curl -s "http://localhost:9090/k10/prometheus/api/v1/query" \
 - **NetworkPolicy does not block cross-namespace Prometheus access.** Kasten's `prometheus-server` NetworkPolicy allows ingress on port 9090 from all sources (no `from` selector), so Grafana in the `monitoring` namespace can reach Prometheus in `kasten-io` without any additional NetworkPolicy.
 - **The `grafana\.ini.smtp.*` Helm set keys require a backslash-escaped dot.** The Grafana chart stores all INI config under a key literally named `grafana.ini` (with a dot). In Helm `--set` syntax, a dot means nested key, so you must escape it: `--set 'grafana\.ini.smtp.enabled=true'`. Without the backslash, `--set grafana.ini.smtp.enabled=true` creates a `grafana > ini > smtp` nested structure which the chart ignores silently — `curl .../api/admin/settings | jq '.smtp.enabled'` returns `"false"` even though `helm get values` shows the setting.
 - **Grafana alert rules require an `interval` set on the rule group.** The per-rule POST API (`/api/v1/provisioning/alert-rules`) rejects rules with `interval: 0` with "interval (0s) should be non-zero and divided exactly by scheduler interval: 10". Use the rule-group PUT API (`/api/v1/provisioning/folder/<uid>/rule-groups/<group>`) which lets you set `interval` at the group level — this is the only API path that works without a pre-existing group.
-- **The `catalog_actions_count` is a gauge, not a counter.** Using `increase()` on it will give misleading results. The failed-action count is cumulative and never decreases for `status="failed"`. Use `sum(catalog_actions_count{status="failed"}) > 0` as the alert condition. The alert will remain firing as long as any historical failure exists — which is intentional: Kasten failures must be acknowledged and resolved, not aged out.
+- **The `catalog_actions_count` is a cumulative gauge that never decreases for `status="failed"`.** Do not alert on the raw value (`IS ABOVE 0`) — that fires forever after the first failure and never self-resolves. Use `increase(catalog_actions_count{status="failed",type="backup"}[1h])` instead: this measures new failures in the last hour and returns 0 (resolving the alert) when no new failures occur. `increase()` is safe here because this specific gauge only goes up.
 - **Mailhog is no longer maintained** (archived on GitHub). It works for local testing, but consider [Mailpit](https://mailpit.axllent.org/) as a modern replacement. Both accept SMTP on port 1025 so the Grafana contact point configuration is the same.
 
 ---
