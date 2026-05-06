@@ -270,25 +270,20 @@ GATEWAY_IP=$(docker inspect kasten-training-control-plane \
   --format '{{ (index .NetworkSettings.Networks "kind").Gateway }}')
 K10_VERSION=$(helm search repo kasten/k10 --output json | jq -r '.[0].app_version')
 
-# Build a Docker config with inline credentials.
-# On macOS, Docker Desktop stores credentials in the system keychain rather than
-# ~/.docker/config.json, so create the config file explicitly.
-REGISTRY_AUTH=$(echo -n "testuser:testpassword" | base64)
-cat > /tmp/registry-config.json << EOF
-{
-  "auths": {
-    "${GATEWAY_IP}:5000": {
-      "auth": "${REGISTRY_AUTH}"
-    }
-  }
-}
-EOF
+# Use a dry-run secret creation to produce the base64-encoded Docker config.
+# This is more reliable than hand-crafting the JSON, and works on macOS where
+# Docker Desktop stores credentials in the keychain rather than ~/.docker/config.json.
+DOCKER_CONFIG_B64=$(kubectl create secret docker-registry k10-ecr \
+  --docker-server="${GATEWAY_IP}:5000" \
+  --docker-username=testuser \
+  --docker-password=testpassword \
+  --dry-run=client -o jsonpath='{.data.\.dockerconfigjson}')
 
 helm upgrade --install k10 kasten/k10 \
   --namespace kasten-io \
   --reuse-values \
   --set "global.airgapped.repository=${GATEWAY_IP}:5000" \
-  --set "secrets.dockerConfig=$(base64 < /tmp/registry-config.json | tr -d '\n')" \
+  --set "secrets.dockerConfig=${DOCKER_CONFIG_B64}" \
   --set "global.imagePullSecret=k10-ecr" \
   --version "${K10_VERSION}" \
   --wait --timeout=600s
@@ -436,7 +431,7 @@ mc ls airgapped/airgapped-bucket/ --recursive | head -10
 - **The private registry must be reachable from both the host and kind nodes.** Bind the registry to `0.0.0.0:5000` (the default for `docker run -p 5000:5000`). From the host, access it at `localhost:5000`. From kind nodes, access it at `${GATEWAY_IP}:5000` (Docker bridge gateway). These are two different URLs for the same service.
 - **Containerd `certs.d` requires `config_path` to be set explicitly.** Writing a `hosts.toml` into `/etc/containerd/certs.d/<registry>/hosts.toml` is not enough on its own — containerd only reads it if `config_path = "/etc/containerd/certs.d"` is also set under `[plugins."io.containerd.grpc.v1.cri".registry]` in `config.toml`. Without this, containerd ignores the `hosts.toml` and tries HTTPS, producing "http: server gave HTTP response to HTTPS client".
 - **Do not use `global.pullSecrets` for private registry auth with Kasten.** The correct parameters are `secrets.dockerConfig` (base64-encoded Docker config) and `global.imagePullSecret=k10-ecr`. The chart creates the `k10-ecr` secret itself and injects it into all pod specs. `global.pullSecrets` is ignored for this purpose.
-- **On macOS, `~/.docker/config.json` may not contain actual credentials.** Docker Desktop stores credentials in the macOS keychain (`"credsStore": "desktop"`) rather than the config file. Always build the Docker config explicitly with inline `auth` credentials as shown in Step 6 rather than relying on `~/.docker/config.json`.
+- **On macOS, `~/.docker/config.json` may not contain actual credentials.** Docker Desktop stores credentials in the macOS keychain (`"credsStore": "desktop"`). Using `kubectl create secret docker-registry --dry-run=client` to generate the Docker config sidesteps this — kubectl builds the config from the flags directly, no keychain involved.
 - **The `k10-ecr` secret name is fixed by the Helm chart.** Do not attempt to use a different name for `global.imagePullSecret`.
 - **`k10tools image copy` takes 10–20 minutes** due to the number of Kasten component images. Plan for this before the session. Re-runs are fast because Docker caches pulled layers.
 - **`k10tools image copy --insecure-registry`** is required when the private registry uses HTTP (no TLS). In production, use a registry with a valid TLS certificate.
