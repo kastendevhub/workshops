@@ -406,8 +406,9 @@ curl -s http://localhost:8025/api/v2/messages | jq '.count'
 | Rule name | `Kasten Backup Failure` |
 | Folder | Create a new folder `Kasten Alerts` |
 | Query (A) | `sum(catalog_actions_count{status="failed",type="backup"})` |
-| Reduce (B) | `Last` |
-| Threshold (C) | IS ABOVE `0` |
+| Threshold (B) | Input: `A`, IS ABOVE `0` |
+
+> **Why no Reduce step?** `catalog_actions_count` is a gauge — it already returns a single scalar value, not a time series. Grafana will warn "Reduce operation is not needed" if you add a Reduce expression. Delete it and point the Threshold directly at A.
 | Evaluation interval | `1m` |
 | Pending period | `1m` |
 | Contact point | `email-alerts` |
