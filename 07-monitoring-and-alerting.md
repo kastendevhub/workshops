@@ -38,6 +38,11 @@ Prometheus (embedded in kasten-io namespace)
 
 Prometheus is embedded in the Kasten Helm chart. **Grafana was removed from the Kasten chart in Kasten 7.5.0** and must be installed separately. This workshop installs Grafana into the `monitoring` namespace.
 
+> **Other approaches:** This workshop covers the standalone Grafana pattern. The [Kasten Enterprise Blueprint monitoring-alerting repository](https://github.com/kastendevhub/enterprise-blueprint/tree/main/monitoring-alerting) documents three additional integration patterns for teams with existing monitoring infrastructure:
+> - [**Community kube-prometheus-stack**](https://github.com/kastendevhub/enterprise-blueprint/blob/main/monitoring-alerting/community.md) — deploys the full kube-prometheus-stack with `AlertManagerConfig` resources for centralized alerting
+> - [**OpenShift user workload monitoring**](https://github.com/kastendevhub/enterprise-blueprint/blob/main/monitoring-alerting/openshift.md) — integrates with OpenShift's built-in monitoring stack via `ServiceMonitor` objects
+> - **Prometheus remote write** — ships Kasten metrics to an existing central Prometheus-compatible backend using remote write
+
 ---
 
 ## Prerequisites
