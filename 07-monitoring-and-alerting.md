@@ -383,7 +383,12 @@ curl -s http://localhost:8025/api/v2/messages | jq '.count'
 5. Add a third panel for catalog PVC usage:
    - **Query:** `100 - catalog_persistent_volume_free_space_percent`
    - **Panel title:** `Catalog PVC Usage %`
-   - **Thresholds:** Yellow at 70, Red at 90
+   - **Visualization:** Switch to **Gauge** (top-right visualization picker) — a percentage metric is best shown as a dial with color zones
+   - **Standard options → Min:** `0`, **Max:** `100`
+   - **Thresholds** (right sidebar → Thresholds section):
+     - Base color: Green (default, covers 0–70)
+     - Click **+ Add threshold** → value `70` → set color to Yellow
+     - Click **+ Add threshold** → value `90` → set color to Red
 
 6. Save the dashboard as `Kasten Overview`.
 
