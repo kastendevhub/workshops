@@ -51,13 +51,7 @@ Prometheus is embedded in the Kasten Helm chart. **Grafana was removed from the 
 - Workshop 1 completed (Kasten + MinIO + MongoDB installed, `mongodb-backup` policy run at least once)
 - Access to an SMTP server for email alerts (Gmail, Mailhog, or similar)
 - `kubectl`, `curl`, `jq` installed
-- **OIDC must not be enabled** on Kasten for this workshop. Kasten's Prometheus endpoint returns HTTP 401 when OIDC authentication is active. If you completed Workshop 5, disable OIDC before continuing:
-  ```bash
-  helm upgrade k10 kasten/k10 --namespace kasten-io \
-    --reuse-values \
-    --set auth.oidcAuth.enabled=false \
-    --wait
-  ```
+- OIDC may be enabled or disabled — this workshop connects Grafana **directly to the Prometheus pod** (`prometheus-server.kasten-io.svc.cluster.local:9090`), bypassing the Kasten gateway entirely, so OIDC authentication has no effect on metrics access.
 
 ---
 
@@ -247,14 +241,14 @@ Open [http://localhost:3000](http://localhost:3000) and log in with username `ad
 
 ### Connect Grafana to Kasten Prometheus
 
-Kasten's embedded Prometheus is still accessible via the Kasten gateway service within the cluster:
+Connect Grafana directly to the Prometheus pod, bypassing the Kasten gateway. This avoids any authentication issues (OIDC, basic auth) because Prometheus itself has no auth. Kasten's `prometheus-server` NetworkPolicy allows port 9090 from any namespace.
 
 1. In Grafana: **Connections → Data Sources → Add data source**
 2. Select **Prometheus**
-3. Set **URL** to: `http://gateway.kasten-io.svc.cluster.local/k10/prometheus`
+3. Set **URL** to: `http://prometheus-server.kasten-io.svc.cluster.local:9090`
 4. Click **Save & Test** — you should see "Successfully queried the Prometheus API"
 
-> **Tip:** The gateway service listens on port 80 inside the cluster (the NodePort 8000 is only for external access). You can verify reachability from inside the cluster: `kubectl run --rm -it probe --image=curlimages/curl --restart=Never -n kasten-io -- curl -s -o /dev/null -w '%{http_code}' http://gateway.kasten-io.svc.cluster.local/k10/prometheus/-/healthy`
+> **Tip:** You can verify direct reachability from inside the cluster: `kubectl run --rm -it probe --image=curlimages/curl --restart=Never -n monitoring -- curl -s -o /dev/null -w '%{http_code}' http://prometheus-server.kasten-io.svc.cluster.local:9090/-/healthy`
 
 ### 3a. Configure SMTP for Email Alerts
 
@@ -535,8 +529,8 @@ curl -s "http://localhost:8080/k10/prometheus/api/v1/query" \
 ## This workshop has challenges
 
 - **Grafana is no longer embedded in Kasten (removed in 7.5.0).** You must install it separately (see Part 3). Any older instruction referencing `http://localhost:8080/k10/grafana` will return 404 on Kasten 7.5.0+. All Grafana steps in this workshop use the external Grafana at `http://localhost:3000`.
-- **Kasten Prometheus returns HTTP 401 when OIDC is enabled.** The Kasten gateway enforces authentication on all routes including `/k10/prometheus/`. If you enabled OIDC in Workshop 5, you must disable it before this workshop: `helm upgrade k10 kasten/k10 --namespace kasten-io --reuse-values --set auth.oidcAuth.enabled=false --wait`. Alternatively, port-forward directly to the Prometheus pod: `kubectl port-forward svc/prometheus-server -n kasten-io 9090:80 &` (no auth required at the Prometheus level itself).
-- **Connecting external Grafana to Kasten Prometheus** requires using the cluster-internal Kasten gateway URL (`http://gateway.kasten-io.svc.cluster.local/k10/prometheus`) as the data source URL. The gateway service listens on port 80 inside the cluster (port 8000 is only for NodePort external access). Using `localhost:8080/k10/prometheus` will fail because Grafana runs inside the cluster and cannot resolve `localhost` to your port-forward.
+- **Use the direct Prometheus URL, not the gateway URL, for Grafana.** Pointing Grafana at `http://gateway.kasten-io.svc.cluster.local/k10/prometheus` routes through the Kasten gateway which enforces OIDC (or basic auth) and returns HTTP 401. The `prometheus-server` NetworkPolicy allows port 9090 from any namespace — use `http://prometheus-server.kasten-io.svc.cluster.local:9090` directly. Using `localhost:8080/k10/prometheus` also fails because Grafana runs inside the cluster and cannot resolve `localhost` to your port-forward.
+- **NetworkPolicy does not block cross-namespace Prometheus access.** Kasten's `prometheus-server` NetworkPolicy allows ingress on port 9090 from all sources (no `from` selector), so Grafana in the `monitoring` namespace can reach Prometheus in `kasten-io` without any additional NetworkPolicy.
 - **The `grafana\.ini.smtp.*` Helm set keys require a backslash-escaped dot.** The Grafana chart stores all INI config under a key literally named `grafana.ini` (with a dot). In Helm `--set` syntax, a dot means nested key, so you must escape it: `--set 'grafana\.ini.smtp.enabled=true'`. Without the backslash, `--set grafana.ini.smtp.enabled=true` creates a `grafana > ini > smtp` nested structure which the chart ignores silently — `curl .../api/admin/settings | jq '.smtp.enabled'` returns `"false"` even though `helm get values` shows the setting.
 - **Grafana alert rules require an `interval` set on the rule group.** The per-rule POST API (`/api/v1/provisioning/alert-rules`) rejects rules with `interval: 0` with "interval (0s) should be non-zero and divided exactly by scheduler interval: 10". Use the rule-group PUT API (`/api/v1/provisioning/folder/<uid>/rule-groups/<group>`) which lets you set `interval` at the group level — this is the only API path that works without a pre-existing group.
 - **The `catalog_actions_count` is a gauge, not a counter.** Using `increase()` on it will give misleading results. The failed-action count is cumulative and never decreases for `status="failed"`. Use `sum(catalog_actions_count{status="failed"}) > 0` as the alert condition. The alert will remain firing as long as any historical failure exists — which is intentional: Kasten failures must be acknowledged and resolved, not aged out.
