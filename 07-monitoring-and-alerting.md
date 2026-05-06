@@ -239,7 +239,7 @@ Open [http://localhost:3000](http://localhost:3000) and log in with username `ad
 >   --set service.type=NodePort \
 >   --set service.nodePort=32030 \
 >   --set 'grafana\.ini.smtp.enabled=true' \
->   --set 'grafana\.ini.smtp.host=mailhog.kasten-io.svc.cluster.local:1025' \
+>   --set 'grafana\.ini.smtp.host=mailhog.monitoring.svc.cluster.local:1025' \
 >   --set 'grafana\.ini.smtp.from_address=grafana@kasten.lab' \
 >   --set 'grafana\.ini.smtp.skip_verify=true' \
 >   --wait
@@ -258,7 +258,9 @@ Connect Grafana directly to the Prometheus service (port 80), bypassing the Kast
 
 ### 3a. Configure SMTP for Email Alerts
 
-In production, use your SMTP server. For local testing, deploy **Mailhog** as a mail catcher:
+In production, use your SMTP server. For local testing, deploy **Mailhog** as a mail catcher in the `monitoring` namespace — not in `kasten-io`. Kasten's `default-deny` NetworkPolicy blocks all ingress to `kasten-io` pods; in production clusters with a NetworkPolicy-enforcing CNI (Calico, Cilium), Grafana's SMTP connection to Mailhog would be silently dropped if Mailhog were in `kasten-io`. Keeping Mailhog in `monitoring` avoids this entirely.
+
+> **Note:** On this kind cluster, kindnet is the CNI and does not enforce NetworkPolicies, so cross-namespace traffic is unrestricted. The placement in `monitoring` is still correct practice for production parity.
 
 ```bash
 kubectl apply -f - <<EOF
@@ -266,7 +268,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mailhog
-  namespace: kasten-io
+  namespace: monitoring
 spec:
   replicas: 1
   selector:
@@ -288,7 +290,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mailhog
-  namespace: kasten-io
+  namespace: monitoring
 spec:
   selector:
     app: mailhog
@@ -301,8 +303,8 @@ spec:
     targetPort: 8025
 EOF
 
-kubectl wait deployment/mailhog -n kasten-io --for=condition=Available --timeout=60s
-kubectl port-forward svc/mailhog -n kasten-io 8025:8025 &
+kubectl wait deployment/mailhog -n monitoring --for=condition=Available --timeout=60s
+kubectl port-forward svc/mailhog -n monitoring 8025:8025 &
 echo "Mailhog UI: http://localhost:8025"
 ```
 
@@ -313,7 +315,7 @@ helm upgrade grafana grafana/grafana \
   --namespace monitoring \
   --reuse-values \
   --set 'grafana\.ini.smtp.enabled=true' \
-  --set 'grafana\.ini.smtp.host=mailhog.kasten-io.svc.cluster.local:1025' \
+  --set 'grafana\.ini.smtp.host=mailhog.monitoring.svc.cluster.local:1025' \
   --set 'grafana\.ini.smtp.from_address=grafana@kasten.lab' \
   --set 'grafana\.ini.smtp.from_name=Grafana' \
   --set 'grafana\.ini.smtp.skip_verify=true' \
