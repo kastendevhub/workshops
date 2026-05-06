@@ -65,6 +65,9 @@ If you are returning to this workshop with the cluster already running, re-estab
 # Kasten dashboard — http://localhost:8080/k10/
 kubectl port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
 
+# Prometheus — http://localhost:9090/k10/prometheus/graph
+kubectl port-forward svc/prometheus-server -n kasten-io 9090:80 &
+
 # MinIO
 kubectl port-forward svc/minio -n minio 9000:9000 &
 mc alias set local http://localhost:9000 minioadmin minioadmin
@@ -79,16 +82,15 @@ kubectl port-forward svc/grafana -n monitoring 3000:80 &
 
 ### Access Prometheus
 
-Kasten's embedded Prometheus is accessible through the Kasten gateway:
+Port-forward directly to the Prometheus service — no gateway, no authentication required:
 
 ```bash
-# Port-forward the Kasten gateway
-kubectl port-forward svc/gateway-nodeport -n kasten-io 8080:8000 &
-
-# Open in browser:
-# http://localhost:8080/k10/prometheus/graph
-echo "Prometheus: http://localhost:8080/k10/prometheus/graph"
+kubectl port-forward svc/prometheus-server -n kasten-io 9090:80 &
 ```
+
+Open the Prometheus UI at [http://localhost:9090/k10/prometheus/graph](http://localhost:9090/k10/prometheus/graph).
+
+> **Why `/k10/prometheus/` in the path?** Kasten's Prometheus is started with `--web.route-prefix=/k10/prometheus`, so it serves all its endpoints under that prefix regardless of how you reach it — through the gateway or directly via port-forward. The path is the same either way.
 
 ### Browse Scrape Targets
 
@@ -98,12 +100,11 @@ You should see targets for each Kasten microservice: `catalog-svc`, `executor`, 
 
 ### Query Catalog Metrics via curl
 
+With the port-forward running, query the Prometheus API directly from your laptop:
+
 ```bash
-kubectl run catalog-metrics -n kasten-io \
-  --rm --restart=Never -it \
-  --image=curlimages/curl \
-  -- curl http://catalog-svc.kasten-io.svc.cluster.local:8000/metrics 2>/dev/null \
-  | grep -A3 "catalog_actions_count"
+curl -s "http://localhost:9090/k10/prometheus/api/v1/query?query=catalog_actions_count" \
+  | jq '.data.result[] | {metric: .metric, value: .value[1]}'
 ```
 
 Expected output:
@@ -117,7 +118,7 @@ catalog_actions_count{liveness="live",namespace="mongodb",policy="mongodb-backup
 
 ### PromQL Queries
 
-Open the Prometheus expression browser at [http://localhost:8080/k10/prometheus/graph](http://localhost:8080/k10/prometheus/graph) and try these queries:
+Open the Prometheus expression browser at [http://localhost:9090/k10/prometheus/graph](http://localhost:9090/k10/prometheus/graph) and try these queries:
 
 | Query | What it shows |
 |-------|--------------|
