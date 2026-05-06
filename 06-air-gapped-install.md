@@ -161,34 +161,43 @@ docker push localhost:5000/alpine
 
 ## Step 4 — Configure Kind to Trust the Private Registry
 
-Containerd in the kind node needs two changes: (1) the `config_path` option must point to `certs.d`, and (2) a `hosts.toml` must declare the registry as HTTP-capable.
+Containerd in the kind node needs three changes appended to `config.toml`:
+1. `config_path` pointing to `certs.d` so per-registry `hosts.toml` files are read
+2. A `hosts.toml` declaring the registry as HTTP-capable (`skip_verify`)
+3. Auth credentials in `config.toml` so containerd can authenticate without Kubernetes `imagePullSecrets`
+
+> **Why containerd auth instead of `imagePullSecrets`?** Kasten's Helm chart sets `global.pullSecrets` to propagate credentials, but in practice the chart does not inject `imagePullSecrets` into pod specs — it relies on the container runtime having the credentials configured directly. Configuring auth in `config.toml` is the reliable path for kind.
 
 ```bash
-# Enable certs.d in the kind node's containerd config
+# 1. Enable certs.d and add registry auth credentials in one pass
 docker exec kasten-training-control-plane bash -c "
-cat >> /etc/containerd/config.toml << 'EOF'
+cat >> /etc/containerd/config.toml << EOF
 
 [plugins.\"io.containerd.grpc.v1.cri\".registry]
   config_path = \"/etc/containerd/certs.d\"
+
+[plugins.\"io.containerd.grpc.v1.cri\".registry.configs.\"${GATEWAY_IP}:5000\".auth]
+  username = \"testuser\"
+  password = \"testpassword\"
 EOF
 "
 
-# Write the per-registry hosts.toml
+# 2. Write the per-registry hosts.toml (HTTP + skip TLS verify)
 docker exec kasten-training-control-plane bash -c "
 mkdir -p /etc/containerd/certs.d/${GATEWAY_IP}:5000
-cat > /etc/containerd/certs.d/${GATEWAY_IP}:5000/hosts.toml << 'TOML'
+cat > /etc/containerd/certs.d/${GATEWAY_IP}:5000/hosts.toml << TOML
 [host.\"http://${GATEWAY_IP}:5000\"]
   capabilities = [\"pull\", \"resolve\"]
   skip_verify = true
 TOML
 "
 
-# Restart containerd
+# 3. Restart containerd to apply both changes
 docker exec kasten-training-control-plane systemctl restart containerd
 sleep 5
 ```
 
-Create an image pull secret (containerd still needs Kubernetes-level credentials for authenticated registries):
+Create an image pull secret in the `default` namespace for the test pod in the next step:
 
 ```bash
 kubectl create secret docker-registry registry-secret \
@@ -281,7 +290,6 @@ helm upgrade --install k10 kasten/k10 \
   --namespace kasten-io \
   --reuse-values \
   --set "global.airgapped.repository=${GATEWAY_IP}:5000" \
-  --set "global.pullSecrets[0]=registry-secret" \
   --version "${K10_VERSION}" \
   --wait --timeout=600s
 ```
@@ -429,7 +437,7 @@ mc ls airgapped/airgapped-bucket/ --recursive | head -10
 
 - **The private registry must be reachable from both the host and kind nodes.** Bind the registry to `0.0.0.0:5000` (the default for `docker run -p 5000:5000`). From the host, access it at `localhost:5000`. From kind nodes, access it at `${GATEWAY_IP}:5000` (Docker bridge gateway). These are two different URLs for the same service.
 - **Containerd `certs.d` requires `config_path` to be set explicitly.** Writing a `hosts.toml` into `/etc/containerd/certs.d/<registry>/hosts.toml` is not enough on its own — containerd only reads it if `config_path = "/etc/containerd/certs.d"` is also set under `[plugins."io.containerd.grpc.v1.cri".registry]` in `config.toml`. Without this, containerd ignores the `hosts.toml` and tries HTTPS, producing "http: server gave HTTP response to HTTPS client".
-- **Authentication for pulls requires an `imagePullSecret` even when `skip_verify = true`.** The `hosts.toml` controls TLS, not authentication. The private registry still requires valid credentials. Pass them via a `docker-registry` Kubernetes secret referenced in pod `imagePullSecrets` (or in the Kasten Helm chart via `global.pullSecrets[0]`).
+- **`global.pullSecrets` does not inject `imagePullSecrets` into Kasten pod specs.** Despite being set, the Helm chart does not propagate `global.pullSecrets` into deployment pod templates. The only reliable authentication path for kind is to add credentials directly to the kind node's `config.toml` under `[plugins."io.containerd.grpc.v1.cri".registry.configs."<registry>".auth]` and restart containerd. With this in place, no `imagePullSecrets` is needed in any pod spec.
 - **`k10tools image copy` takes 10–20 minutes** due to the number of Kasten component images. Plan for this before the session. Re-runs are fast because Docker caches pulled layers.
 - **`k10tools image copy --insecure-registry`** is required when the private registry uses HTTP (no TLS). In production, use a registry with a valid TLS certificate.
 - **NFS on macOS Docker Desktop is not supported.** The Docker Desktop VM does not have the NFS kernel module, so `rpc.nfsd` containers (`erichough/nfs-server`, `itsthenetwork/nfs-server-alpine`) always fail with "does not support NFS export". This workshop uses MinIO instead of NFS for the backup location — MinIO is simpler, cross-platform, and equally representative of air-gapped S3 storage.
@@ -445,4 +453,4 @@ mc ls airgapped/airgapped-bucket/ --recursive | head -10
 - [MinIO Docker Quickstart](https://min.io/docs/minio/container/index.html)
 - In production, the private registry would be JFrog Artifactory, Harbor, AWS ECR, or Azure ACR — all work with `k10tools image copy` by specifying the appropriate `--registry` value.
 - Kasten's `global.airgapped.repository` Helm value prefixes **all** image references in the chart — you don't need to configure images individually.
-- The `global.pullSecrets` Helm value accepts a list of secret names; each must be a `docker-registry` type secret in the `kasten-io` namespace.
+- For kind, configure registry credentials in containerd's `config.toml` on each node rather than relying on `global.pullSecrets` — the Helm chart does not inject `imagePullSecrets` into pod specs.
