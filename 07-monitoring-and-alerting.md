@@ -38,10 +38,12 @@ Prometheus (embedded in kasten-io namespace)
 
 Prometheus is embedded in the Kasten Helm chart. **Grafana was removed from the Kasten chart in Kasten 7.5.0** and must be installed separately. This workshop installs Grafana into the `monitoring` namespace.
 
+This workshop uses a **pull model**: Grafana reaches into the `kasten-io` namespace to scrape Prometheus directly. This works because Kasten's `prometheus-server` NetworkPolicy allows port 9090 from any namespace. In environments where the `kasten-io` namespace must be strictly isolated (no inbound connections from other namespaces), the **push model via `remote_write`** is the right architectural choice: Kasten's Prometheus pushes metrics out to a central backend, so no external namespace ever needs ingress access to `kasten-io`.
+
 > **Other approaches:** This workshop covers the standalone Grafana pattern. The [Kasten Enterprise Blueprint monitoring-alerting repository](https://github.com/kastendevhub/enterprise-blueprint/tree/main/monitoring-alerting) documents three additional integration patterns for teams with existing monitoring infrastructure:
 > - [**Community kube-prometheus-stack**](https://github.com/kastendevhub/enterprise-blueprint/blob/main/monitoring-alerting/community.md) — deploys the full kube-prometheus-stack with `AlertManagerConfig` resources for centralized alerting
 > - [**OpenShift user workload monitoring**](https://github.com/kastendevhub/enterprise-blueprint/blob/main/monitoring-alerting/openshift.md) — integrates with OpenShift's built-in monitoring stack via `ServiceMonitor` objects
-> - **Prometheus remote write** — ships Kasten metrics to an existing central Prometheus-compatible backend using remote write
+> - **Prometheus remote write** — pushes Kasten metrics out to a central backend; the preferred approach when `kasten-io` namespace isolation must be enforced and no inbound connections from other namespaces are permitted
 
 ---
 
