@@ -401,6 +401,8 @@ curl -s http://localhost:8025/api/v2/messages | jq '.count'
 1. In Grafana: **Alerting → Alert Rules → + New Alert Rule**
 2. Set the query and expressions (**Set a query and alert condition** section):
 
+   > Enable **Advanced options** (toggle in the top-right of the section) to reveal the Reduce and Threshold expression rows.
+
 | Field | Value |
 |-------|-------|
 | Query (A) | `increase(catalog_actions_count{status="failed",type="backup"}[1h])` |
