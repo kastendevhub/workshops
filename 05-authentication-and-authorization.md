@@ -78,9 +78,14 @@ Keycloak's OIDC issuer URL must be reachable from two very different contexts:
 The solution is a custom hostname — `keycloak.k10lab` — registered in both places:
 
 ```bash
-# Mac /etc/hosts — browser resolves keycloak.k10lab to localhost (port-forward)
+# Mac/Linux /etc/hosts — browser resolves keycloak.k10lab to localhost (port-forward)
 echo "127.0.0.1 keycloak.k10lab" | sudo tee -a /etc/hosts
 ```
+
+> **Windows (WSL2) users:** your browser runs on Windows, not inside WSL2, so adding the entry to WSL2's `/etc/hosts` is not enough. Also add it to `C:\Windows\System32\drivers\etc\hosts` (open Notepad as Administrator):
+> ```
+> 127.0.0.1 keycloak.k10lab
+> ```
 
 ```bash
 # CoreDNS — kind pods resolve keycloak.k10lab to the East node's Docker bridge IP
