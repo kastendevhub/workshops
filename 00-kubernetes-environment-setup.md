@@ -31,7 +31,7 @@ All subsequent workshops assume this environment is in place.
 
 The cluster needs to expose specific host paths so the CSI hostpath driver can provision volumes.
 
-> **Pin the Kubernetes version.** By default Kind creates a cluster with the latest Kubernetes release (currently 1.36.x), which is **not yet supported by K10**. Always pin the node image to a version K10 supports via the `image:` field below. Check the [K10 Kubernetes support matrix](https://docs.kasten.io/latest/install/requirements.html) and pick the latest version compatible with the K10 release you are testing — then update the image tag accordingly. The `v1.32.2` tag below is just a known-good example.
+> **Pin the Kubernetes version.** By default Kind creates a cluster with the latest Kubernetes release (currently 1.36.x), which is **not yet supported by K10**. Always pin the node image to a version K10 supports via the `image:` field below. Check the [K10 support matrix](https://docs.kasten.io/latest/operating/support) and pick the latest Kubernetes version compatible with the K10 release you are testing (currently up to **1.34**) — then update the image tag accordingly. The `v1.34.0` tag below is just a known-good example.
 
 ```bash
 cat <<EOF | kind create cluster --name kasten-training --config=-
@@ -39,7 +39,7 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
-  image: kindest/node:v1.32.2
+  image: kindest/node:v1.34.0
   extraMounts:
   - hostPath: /tmp/csi-data-dir
     containerPath: /csi-data-dir
