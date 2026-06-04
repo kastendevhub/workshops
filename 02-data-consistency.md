@@ -260,7 +260,10 @@ spec:
     namespace: kasten-io
 EOF
 
-kubectl get runaction mongodb-logical-run-1 -n kasten-io -w
+# Note: runaction does not support `kubectl ... -w` (watch is not allowed on
+# this resource). Use the `watch` command to poll the status instead.
+# On macOS, `watch` is not built in — install it with `brew install watch`.
+watch kubectl get runaction mongodb-logical-run-1 -n kasten-io
 ```
 
 After the backup completes, verify the `mongodump` artifact appeared in MinIO:

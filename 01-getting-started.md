@@ -320,8 +320,11 @@ spec:
     namespace: kasten-io
 EOF
 
-# Watch until complete
-kubectl get runaction mongodb-backup-run-1 -n kasten-io -w
+# Watch until complete.
+# Note: runaction does not support `kubectl ... -w` (watch is not allowed on
+# this resource). Use the `watch` command to poll the status instead.
+# On macOS, `watch` is not built in — install it with `brew install watch`.
+watch kubectl get runaction mongodb-backup-run-1 -n kasten-io
 ```
 
 ---
