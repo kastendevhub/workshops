@@ -106,6 +106,8 @@ A logical backup uses application-native tools (`mongodump`, `pg_dump`, etc.) to
 
 The Blueprint uses `kando output` to record the backup path, then exposes it via `outputArtifacts` using `{{ .Phases.<name>.Output.<key> }}`. This is required because `outputArtifacts` are resolved from phase outputs — you cannot reference them via `ArtifactsIn` within the same backup phase.
 
+> **Why `MultiContainerRun` (and why it matters on Apple Silicon).** This Blueprint runs the dump with the `MultiContainerRun` function instead of a single `KubeTask`, for architecture portability. No single multi-arch image carries **both** `kando` and the MongoDB CLI tools: `gcr.io/kasten-images/kanister-tools` (multi-arch) has `kando` but no `mongodump`, while the official `mongo:7.0` image (multi-arch — amd64 **and** arm64) has `mongodump`/`mongorestore` but no `kando`. `MultiContainerRun` runs each tool in its own container and streams the dump between them through a shared FIFO. This keeps the lab working natively on both x86_64 and Apple Silicon. The earlier single-image approach used `ghcr.io/kanisterio/mongodb`, which is published **amd64-only** and crashes under emulation on arm64 Macs (the dump pod fails immediately with a Go runtime panic).
+
 Also add a `backupParameters.profile` to the policy (see step 2c) so Kasten knows which location profile to pass to `kando location push/pull`.
 
 ```bash
@@ -122,11 +124,22 @@ actions:
         keyValue:
           path: '{{ .Phases.takeDump.Output.backupPath }}'
     phases:
-    - func: KubeTask
+    - func: MultiContainerRun
       name: takeDump
+      objects:
+        mongoSecret:
+          kind: Secret
+          name: mongo-mongodb
+          namespace: "{{ .StatefulSet.Namespace }}"
       args:
-        image: ghcr.io/kanisterio/mongodb:0.105.0
-        command:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        sharedVolumeMedium: Memory
+        # init: create the FIFO the producer and consumer stream through
+        initImage: '{{ if index .Options "kanisterImage" }}{{ .Options.kanisterImage }}{{ else }}gcr.io/kasten-images/kanister-tools:8.5.11{{ end }}'
+        initCommand: ["bash", "-o", "errexit", "-o", "pipefail", "-c", "mkfifo /tmp/data; chmod 666 /tmp/data"]
+        # producer: mongo:7.0 (multi-arch) runs mongodump and streams the archive into the FIFO
+        backgroundImage: mongo:7.0
+        backgroundCommand:
         - bash
         - -o
         - errexit
@@ -134,31 +147,46 @@ actions:
         - pipefail
         - -c
         - |
-          export MONGODB_ROOT_PASSWORD='{{ index .Phases.takeDump.Secrets.mongoSecret.Data "mongodb-root-password" | toString }}'
-          BACKUP_PATH="mongo-backups/{{ .StatefulSet.Namespace }}/{{ toDate "2006-01-02T15:04:05.999999999Z07:00" .Time | date "2006-01-02T15-04-05" }}/dump.tar.gz"
+          dbPassword='{{ index .Phases.takeDump.Secrets.mongoSecret.Data "mongodb-root-password" | toString }}'
           mongodump \
             --authenticationDatabase admin \
             -u root \
-            -p "$MONGODB_ROOT_PASSWORD" \
+            -p "${dbPassword}" \
             --host "mongo-mongodb-0.mongo-mongodb-headless.{{ .StatefulSet.Namespace }}:27017" \
             --gzip \
-            --archive=/tmp/dump.tar.gz
-          kando location push --profile '{{ toJson .Profile }}' --path "${BACKUP_PATH}" /tmp/dump.tar.gz
+            --archive > /tmp/data
+        # consumer: kanister-tools (multi-arch) reads the FIFO and pushes to the location profile
+        outputImage: '{{ if index .Options "kanisterImage" }}{{ .Options.kanisterImage }}{{ else }}gcr.io/kasten-images/kanister-tools:8.5.11{{ end }}'
+        outputCommand:
+        - bash
+        - -o
+        - errexit
+        - -o
+        - pipefail
+        - -c
+        - |
+          BACKUP_PATH="mongo-backups/{{ .StatefulSet.Namespace }}/{{ toDate "2006-01-02T15:04:05.999999999Z07:00" .Time | date "2006-01-02T15-04-05" }}/dump.tar.gz"
+          cat /tmp/data | kando location push --profile '{{ toJson .Profile }}' --path "${BACKUP_PATH}" -
           kando output backupPath "${BACKUP_PATH}"
-      objects:
-        mongoSecret:
-          kind: Secret
-          name: mongo-mongodb
-          namespace: "{{ .StatefulSet.Namespace }}"
   restore:
     inputArtifactNames:
     - mongoBackup
     phases:
-    - func: KubeTask
+    - func: MultiContainerRun
       name: restoreDump
+      objects:
+        mongoSecret:
+          kind: Secret
+          name: mongo-mongodb
+          namespace: "{{ .StatefulSet.Namespace }}"
       args:
-        image: ghcr.io/kanisterio/mongodb:0.105.0
-        command:
+        namespace: "{{ .StatefulSet.Namespace }}"
+        sharedVolumeMedium: Memory
+        initImage: '{{ if index .Options "kanisterImage" }}{{ .Options.kanisterImage }}{{ else }}gcr.io/kasten-images/kanister-tools:8.5.11{{ end }}'
+        initCommand: ["bash", "-o", "errexit", "-o", "pipefail", "-c", "mkfifo /tmp/data; chmod 666 /tmp/data"]
+        # producer: kanister-tools (multi-arch) pulls the archive from the location profile into the FIFO
+        backgroundImage: '{{ if index .Options "kanisterImage" }}{{ .Options.kanisterImage }}{{ else }}gcr.io/kasten-images/kanister-tools:8.5.11{{ end }}'
+        backgroundCommand:
         - bash
         - -o
         - errexit
@@ -166,21 +194,26 @@ actions:
         - pipefail
         - -c
         - |
-          export MONGODB_ROOT_PASSWORD='{{ index .Phases.restoreDump.Secrets.mongoSecret.Data "mongodb-root-password" | toString }}'
-          kando location pull --profile '{{ toJson .Profile }}' --path '{{ .ArtifactsIn.mongoBackup.KeyValue.path }}' /tmp/dump.tar.gz
-          mongorestore \
+          kando location pull --profile '{{ toJson .Profile }}' --path '{{ .ArtifactsIn.mongoBackup.KeyValue.path }}' - > /tmp/data
+        # consumer: mongo:7.0 (multi-arch) reads the FIFO and runs mongorestore
+        outputImage: mongo:7.0
+        outputCommand:
+        - bash
+        - -o
+        - errexit
+        - -o
+        - pipefail
+        - -c
+        - |
+          dbPassword='{{ index .Phases.restoreDump.Secrets.mongoSecret.Data "mongodb-root-password" | toString }}'
+          cat /tmp/data | mongorestore \
             --authenticationDatabase admin \
             -u root \
-            -p "$MONGODB_ROOT_PASSWORD" \
+            -p "${dbPassword}" \
             --host "mongo-mongodb-0.mongo-mongodb-headless.{{ .StatefulSet.Namespace }}:27017" \
             --gzip \
-            --archive=/tmp/dump.tar.gz \
+            --archive \
             --drop
-      objects:
-        mongoSecret:
-          kind: Secret
-          name: mongo-mongodb
-          namespace: "{{ .StatefulSet.Namespace }}"
 EOF
 ```
 
