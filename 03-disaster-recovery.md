@@ -555,9 +555,12 @@ After the catalog is restored, `RestorePointContent` objects are already present
 
 Via the dashboard:
 
-1. **Applications → mongodb → Restore Points** — select the most recent **exported** restore point (marked with the export icon or the profile name `s3-local`)
-2. **Restore** → confirm
-3. Repeat for `mysql`
+Because the namespaces were lost in the disaster, the applications are no longer running — they appear under the **Removed** tab, not as active applications.
+
+1. **Applications → Removed → `mongodb` → Restore** — then select the most recent **exported** restore point (marked with the export icon or the profile name `s3-local`) and confirm.
+2. Repeat for `mysql`.
+
+Alternatively, go to the **Restore Points** page and filter by namespace (e.g. `mongodb`), pick the most recent **Exported** restore point, and restore from there.
 
 Via `kubectl`:
 
