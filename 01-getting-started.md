@@ -63,6 +63,13 @@ k10tools --version
 k10tools primer
 ```
 
+Alternativly, you can use the following script:
+
+```bash
+./scripts/install-k10tools.sh
+k10tools primer
+```
+
 Look for all checks to complete with `OK` status. The CSI provisioner and VolumeSnapshotClass checks are the critical ones for Kasten.
 
 ---
